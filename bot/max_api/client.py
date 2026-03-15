@@ -207,7 +207,6 @@ class MaxClient:
         """
         if self._rate_limiter is None:
             self._rate_limiter = TokenBucketRateLimiter(
-                redis_url=settings.redis_url,
                 max_rps=settings.max_rps,
             )
         return self._rate_limiter
