@@ -500,7 +500,7 @@ class MaxClient:
             content_type=content_type,
         )
 
-        async with session.post(url, data=data) as response:
+        async with session.post(url, data=form) as response:
             # Get response text for logging
             response_text = await response.text()
 
