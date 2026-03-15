@@ -453,7 +453,13 @@ class MaxClient:
             upload_token=data.get("upload_token"),
         )
 
-    async def _upload_file(self, url: str, file_path: str | Path | bytes) -> dict:
+    async def _upload_file(
+        self,
+        url: str,
+        file_path: str | Path | bytes,
+        filename: str,
+        content_type: str,
+    ) -> dict:
         """
         Upload file content to the provided URL using multipart/form-data.
 
@@ -462,6 +468,8 @@ class MaxClient:
         Args:
             url: Upload URL from initiate step
             file_path: Path to file or file content as bytes
+            filename: Filename with extension (e.g., "photo.jpg")
+            content_type: MIME type (e.g., "image/jpeg")
 
         Returns:
             Response JSON data (contains token for image/file types)
@@ -483,9 +491,14 @@ class MaxClient:
         # Upload using POST with multipart/form-data
         session = await self._get_session()
 
-        # Prepare multipart form data
-        data = aiohttp.FormData()
-        data.add_field('data', file_content, filename='file')
+        # Prepare multipart form data with proper filename and content_type
+        form = aiohttp.FormData()
+        form.add_field(
+            'data',           # Field name must be exactly "data" per Max API spec
+            file_content,
+            filename=filename,
+            content_type=content_type,
+        )
 
         async with session.post(url, data=data) as response:
             # Get response text for logging
@@ -530,7 +543,12 @@ class MaxClient:
         upload_info = await self._upload_initiate(MediaType.IMAGE)
 
         # Step 2: Upload file and get token from response
-        upload_response = await self._upload_file(upload_info.url, file_path)
+        upload_response = await self._upload_file(
+            upload_info.url,
+            file_path,
+            filename='image.jpg',
+            content_type='image/jpeg',
+        )
 
         logger.info(f"upload_image response: {upload_response}")
         token = upload_response.get("token", "")
@@ -569,7 +587,12 @@ class MaxClient:
             MaxAPIError: On upload failure
         """
         upload_info = await self._upload_initiate(MediaType.VIDEO)
-        await self._upload_file(upload_info.url, file_path)
+        await self._upload_file(
+            upload_info.url,
+            file_path,
+            filename='video.mp4',
+            content_type='video/mp4',
+        )
 
         # Pause for attachment processing
         await asyncio.sleep(self.upload_pause)
@@ -591,7 +614,12 @@ class MaxClient:
             MaxAPIError: On upload failure
         """
         upload_info = await self._upload_initiate(MediaType.AUDIO)
-        await self._upload_file(upload_info.url, file_path)
+        await self._upload_file(
+            upload_info.url,
+            file_path,
+            filename='audio.mp3',
+            content_type='audio/mpeg',
+        )
 
         # Pause for attachment processing
         await asyncio.sleep(self.upload_pause)
@@ -618,7 +646,12 @@ class MaxClient:
         upload_info = await self._upload_initiate(MediaType.FILE)
 
         # Step 2: Upload file and get token from response
-        upload_response = await self._upload_file(upload_info.url, file_path)
+        upload_response = await self._upload_file(
+            upload_info.url,
+            file_path,
+            filename='file.bin',
+            content_type='application/octet-stream',
+        )
 
         logger.info(f"upload_file response: {upload_response}")
         token = upload_response.get("token", "")
