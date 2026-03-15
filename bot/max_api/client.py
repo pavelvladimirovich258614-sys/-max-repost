@@ -387,7 +387,7 @@ class MaxClient:
         self,
         chat_id: str,
         text: str,
-        attachments: list[str] | None = None,
+        attachments: list[dict] | None = None,
         format: str = "html",
     ) -> SendMessageResponse:
         """
@@ -396,7 +396,8 @@ class MaxClient:
         Args:
             chat_id: Target chat ID
             text: Message text (max 4000 chars)
-            attachments: List of attachment tokens
+            attachments: List of attachment objects in format:
+                         [{"type": "image", "payload": {"token": "..."}}, ...]
             format: Text format ("html" or "markdown")
 
         Returns:
@@ -410,8 +411,8 @@ class MaxClient:
             logger.warning(f"Message text exceeds 4000 chars ({len(text)}), truncating")
             text = text[:4000]
 
+        # Build request body according to Max API spec
         payload: dict[str, Any] = {
-            "chat_id": chat_id,
             "text": text,
         }
 
@@ -421,7 +422,9 @@ class MaxClient:
         if format in ("html", "markdown"):
             payload["format"] = format
 
-        data = await self._request("POST", "/messages", json=payload)
+        # Use query parameter for chat_id, not in body
+        endpoint = f"/messages?chat_id={chat_id}"
+        data = await self._request("POST", endpoint, json=payload)
 
         return SendMessageResponse(
             message_id=data.get("message_id", ""),
@@ -450,13 +453,18 @@ class MaxClient:
             upload_token=data.get("upload_token"),
         )
 
-    async def _upload_file(self, url: str, file_path: str | Path | bytes) -> None:
+    async def _upload_file(self, url: str, file_path: str | Path | bytes) -> dict:
         """
-        Upload file content to the provided URL.
+        Upload file content to the provided URL using multipart/form-data.
+
+        Max API spec: POST {url} with multipart/form-data, field name="data"
 
         Args:
             url: Upload URL from initiate step
             file_path: Path to file or file content as bytes
+
+        Returns:
+            Response JSON data (contains token for image/file types)
 
         Raises:
             MaxAPIError: On upload failure
@@ -472,10 +480,14 @@ class MaxClient:
         else:
             file_content = file_path
 
-        # Upload using PUT (common for Max API) or POST
+        # Upload using POST with multipart/form-data
         session = await self._get_session()
 
-        async with session.put(url, data=file_content) as response:
+        # Prepare multipart form data
+        data = aiohttp.FormData()
+        data.add_field('data', file_content, filename='file')
+
+        async with session.post(url, data=data) as response:
             if response.status not in (200, 201, 202):
                 error_text = await response.text()
                 raise MaxAPIError(
@@ -483,9 +495,19 @@ class MaxClient:
                     status_code=response.status,
                 )
 
+            # Parse response JSON
+            try:
+                response_data = await response.json()
+            except aiohttp.ContentTypeError:
+                response_data = {}
+
+            return response_data if isinstance(response_data, dict) else {}
+
     async def upload_image(self, file_path: str | Path | bytes) -> str:
         """
         Upload an image and return its token.
+
+        For image: token comes from step 2 (upload response)
 
         Args:
             file_path: Path to image file or bytes content
@@ -496,14 +518,21 @@ class MaxClient:
         Raises:
             MaxAPIError: On upload failure
         """
+        # Step 1: Get upload URL
         upload_info = await self._upload_initiate(MediaType.IMAGE)
-        await self._upload_file(upload_info.url, file_path)
+
+        # Step 2: Upload file and get token from response
+        upload_response = await self._upload_file(upload_info.url, file_path)
+        token = upload_response.get("token", "")
+
+        if not token:
+            raise MaxAPIError("Upload response did not contain token")
 
         # Pause for attachment processing
         await asyncio.sleep(self.upload_pause)
 
-        logger.debug(f"Image uploaded, token: {upload_info.token}")
-        return upload_info.token
+        logger.debug(f"Image uploaded, token: {token}")
+        return token
 
     async def upload_video(self, file_path: str | Path | bytes) -> str:
         """
@@ -556,6 +585,8 @@ class MaxClient:
         """
         Upload a generic file and return its token.
 
+        For file: token comes from step 2 (upload response)
+
         Args:
             file_path: Path to file or bytes content
 
@@ -565,14 +596,21 @@ class MaxClient:
         Raises:
             MaxAPIError: On upload failure
         """
+        # Step 1: Get upload URL
         upload_info = await self._upload_initiate(MediaType.FILE)
-        await self._upload_file(upload_info.url, file_path)
+
+        # Step 2: Upload file and get token from response
+        upload_response = await self._upload_file(upload_info.url, file_path)
+        token = upload_response.get("token", "")
+
+        if not token:
+            raise MaxAPIError("Upload response did not contain token")
 
         # Pause for attachment processing
         await asyncio.sleep(self.upload_pause)
 
-        logger.debug(f"File uploaded, token: {upload_info.token}")
-        return upload_info.token
+        logger.debug(f"File uploaded, token: {token}")
+        return token
 
     async def upload_media(self, file_path: str | Path | bytes, media_type: str) -> str:
         """

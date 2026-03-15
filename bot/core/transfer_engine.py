@@ -458,11 +458,12 @@ class TransferEngine:
         # Upload to Max
         token = await self.max_client.upload_image(photo_bytes)
 
-        # Send message with attachment
+        # Send message with attachment in new Max API format
+        attachment = {"type": "image", "payload": {"token": token}}
         await self.max_client.send_message(
             chat_id=max_channel_id,
             text=text,
-            attachments=[token] if token else None,
+            attachments=[attachment] if token else None,
         )
 
     async def _transfer_video(
@@ -481,11 +482,12 @@ class TransferEngine:
         # Upload to Max
         token = await self.max_client.upload_video(video_bytes)
 
-        # Send message with attachment
+        # Send message with attachment in new Max API format
+        attachment = {"type": "video", "payload": {"token": token}}
         await self.max_client.send_message(
             chat_id=max_channel_id,
             text=text,
-            attachments=[token] if token else None,
+            attachments=[attachment] if token else None,
         )
 
     async def _transfer_audio(
@@ -504,11 +506,12 @@ class TransferEngine:
         # Upload to Max
         token = await self.max_client.upload_audio(audio_bytes)
 
-        # Send message with attachment
+        # Send message with attachment in new Max API format
+        attachment = {"type": "audio", "payload": {"token": token}}
         await self.max_client.send_message(
             chat_id=max_channel_id,
             text=text,
-            attachments=[token] if token else None,
+            attachments=[attachment] if token else None,
         )
 
     async def _transfer_file(
@@ -527,11 +530,12 @@ class TransferEngine:
         # Upload to Max
         token = await self.max_client.upload_file(file_bytes)
 
-        # Send message with attachment
+        # Send message with attachment in new Max API format
+        attachment = {"type": "file", "payload": {"token": token}}
         await self.max_client.send_message(
             chat_id=max_channel_id,
             text=text,
-            attachments=[token] if token else None,
+            attachments=[attachment] if token else None,
         )
 
     async def _transfer_album(
