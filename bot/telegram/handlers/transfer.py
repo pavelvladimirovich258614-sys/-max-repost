@@ -1,5 +1,8 @@
 """Post transfer handler - FSM flow for manual post transfer from TG to Max."""
 
+import time
+from typing import Optional
+
 from aiogram import Router
 from aiogram.filters import StateFilter
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
@@ -15,6 +18,7 @@ from bot.telegram.keyboards.transfer import (
 )
 from bot.max_api.client import MaxClient, MaxAPIError
 from bot.core.telethon_client import get_telethon_client
+from bot.core.transfer_engine import TransferEngine, TransferResult
 from config.settings import settings
 
 
@@ -215,6 +219,207 @@ async def _show_max_connection_instructions(message: Message, state, channel_tit
     await state.set_state(TransferStates.transfer_waiting_max_channel)
 
 
+# =============================================================================
+# Transfer Execution
+# =============================================================================
+
+
+async def _execute_transfer(
+    message: Message,
+    state,
+    count: int | str,
+    is_callback: bool = False,
+) -> None:
+    """
+    Execute the actual transfer process.
+
+    Args:
+        message: Message object (from callback or message handler)
+        state: FSM state
+        count: Number of posts to transfer or "all"
+        is_callback: Whether message comes from callback query
+    """
+    data = await state.get_data()
+    tg_channel = data.get("transfer_tg_channel_username", "")
+    max_channel_id = data.get("transfer_max_channel_id", "")
+    channel_title = data.get("transfer_tg_channel_title", "Канал")
+
+    if not tg_channel or not max_channel_id:
+        error_text = "❌ Ошибка: данные канала утеряны. Начните заново."
+        if is_callback:
+            await message.edit_text(error_text, reply_markup=back_to_start_keyboard())
+        else:
+            await message.answer(error_text, reply_markup=back_to_start_keyboard())
+        await state.clear()
+        return
+
+    # Show initial progress message
+    count_text = "Все посты" if count == "all" else f"{count} постов"
+    progress_message = await (message.answer if not is_callback else message.edit_text)(
+        f"⏳ Запускаю перенос...\n\n"
+        f"Канал: {channel_title}\n"
+        f"Выбрано: {count_text}\n\n"
+        f"Подготовка...",
+        parse_mode="HTML",
+    )
+
+    # Create progress callback with throttling
+    last_update_time = 0
+    UPDATE_INTERVAL = 3.0  # Minimum seconds between updates
+
+    async def progress_callback(current: int, total: int, success: int, failed: int, skipped: int) -> None:
+        nonlocal last_update_time
+        current_time = time.time()
+
+        # Throttle updates to avoid FloodWait
+        if current_time - last_update_time < UPDATE_INTERVAL:
+            return
+
+        last_update_time = current_time
+        percent = int((current / total) * 100) if total > 0 else 0
+
+        try:
+            if is_callback:
+                await progress_message.edit_text(
+                    f"⏳ <b>Перенос в процессе</b>\n\n"
+                    f"Канал: {channel_title}\n"
+                    f"Прогресс: {current}/{total} ({percent}%)\n\n"
+                    f"✅ Успешно: {success}\n"
+                    f"❌ Ошибок: {failed}\n"
+                    f"⏭ Пропущено: {skipped}",
+                    parse_mode="HTML",
+                )
+            else:
+                # For message handlers, we need to send new messages
+                # (editing is more complex due to message_id differences)
+                await progress_message.edit_text(
+                    f"⏳ <b>Перенос в процессе</b>\n\n"
+                    f"Канал: {channel_title}\n"
+                    f"Прогресс: {current}/{total} ({percent}%)\n\n"
+                    f"✅ Успешно: {success}\n"
+                    f"❌ Ошибок: {failed}\n"
+                    f"⏭ Пропущено: {skipped}",
+                    parse_mode="HTML",
+                )
+        except Exception as e:
+            logger.warning(f"Failed to update progress message: {e}")
+
+    # Execute transfer
+    try:
+        # Get clients
+        telethon = get_telethon_client(
+            api_id=settings.telegram_api_id,
+            api_hash=settings.telegram_api_hash,
+            phone=settings.telegram_phone,
+        )
+        max_client = MaxClient()
+
+        # Create engine
+        engine = TransferEngine(
+            telethon_client=telethon,
+            max_api_client=max_client,
+            db_session=None,  # No DB session needed for one-time transfer
+        )
+
+        # Run transfer
+        result: TransferResult = await engine.transfer_posts(
+            tg_channel=tg_channel,
+            max_channel_id=max_channel_id,
+            count=count,
+            progress_callback=progress_callback,
+        )
+
+        # Close clients
+        await max_client.close()
+
+        # Show final result
+        result_text = (
+            f"✅ <b>Перенос завершён!</b>\n\n"
+            f"Канал: {channel_title}\n\n"
+            f"📊 <b>Статистика:</b>\n"
+            f"Всего обработано: {result.total}\n"
+            f"✅ Успешно: {result.success}\n"
+            f"❌ Ошибок: {result.failed}\n"
+            f"⏭ Пропущено: {result.skipped}"
+        )
+
+        if result.errors:
+            error_summary = "\n\n".join(
+                f"• Пост {e.post_id}: {e.error_message}"
+                for e in result.errors[:3]  # Show first 3 errors
+            )
+            if len(result.errors) > 3:
+                error_summary += f"\n• и ещё {len(result.errors) - 3} ошибок"
+            result_text += f"\n\n❌ <b>Ошибки:</b>\n{error_summary}"
+
+        if is_callback:
+            await progress_message.edit_text(
+                result_text,
+                parse_mode="HTML",
+                reply_markup=transfer_complete_keyboard(),
+            )
+        else:
+            await progress_message.edit_text(
+                result_text,
+                parse_mode="HTML",
+                reply_markup=transfer_complete_keyboard(),
+            )
+
+        logger.info(
+            f"Transfer completed: {result.success} success, "
+            f"{result.failed} failed, {result.skipped} skipped"
+        )
+
+    except MaxAPIError as e:
+        logger.error(f"Max API error during transfer: {e}")
+        error_text = (
+            f"❌ <b>Ошибка переноса</b>\n\n"
+            f"Канал: {channel_title}\n\n"
+            f"Ошибка API Max: {str(e)}\n\n"
+            f"Проверьте:\n"
+            f"• Бот «Репост» добавлен в канал Max\n"
+            f"• Боту выданы права «Писать посты»"
+        )
+        if is_callback:
+            await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
+        else:
+            await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
+
+    except RuntimeError as e:
+        logger.error(f"Runtime error during transfer: {e}")
+        error_text = (
+            f"❌ <b>Ошибка переноса</b>\n\n"
+            f"{str(e)}\n\n"
+            f"Убедитесь, что:\n"
+            f"• Вы авторизовали Telethon (python scripts/auth_telethon.py)\n"
+            f"• Файл user_session.session существует"
+        )
+        if is_callback:
+            await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
+        else:
+            await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
+
+    except Exception as e:
+        logger.error(f"Unexpected error during transfer: {e}")
+        error_text = (
+            f"❌ <b>Ошибка переноса</b>\n\n"
+            f"Произошла непредвиденная ошибка.\n"
+            f"Попробуйте позже или обратитесь в поддержку."
+        )
+        if is_callback:
+            await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
+        else:
+            await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
+
+    finally:
+        await state.clear()
+
+
+# =============================================================================
+# Max Channel Handler
+# =============================================================================
+
+
 @transfer_router.message(StateFilter(TransferStates.transfer_waiting_max_channel))
 async def process_transfer_max_channel(message: Message, state) -> None:
     """
@@ -313,7 +518,7 @@ async def process_transfer_max_channel(message: Message, state) -> None:
 @transfer_router.callback_query(StateFilter(TransferStates.transfer_select_count))
 async def process_post_count_selection(callback: CallbackQuery, state) -> None:
     """
-    Process user's selection of post count.
+    Process user's selection of post count and start transfer.
 
     Args:
         callback: Callback query with selection
@@ -348,27 +553,8 @@ async def process_post_count_selection(callback: CallbackQuery, state) -> None:
         await callback.answer("Неизвестный выбор", show_alert=True)
         return
 
-    data = await state.get_data()
-    channel_title = data.get("transfer_tg_channel_title", "Канал")
-
-    if count == "all":
-        count_text = "Все посты"
-    else:
-        count_text = f"{count} постов"
-
-    await callback.message.edit_text(
-        f"🚧 <b>Перенос будет реализован на следующем этапе</b>\n\n"
-        f"Канал: {channel_title}\n"
-        f"Выбрано: {count_text}\n\n"
-        f"Функционал переноса постов будет доступен после реализации Core Engine.",
-        parse_mode="HTML",
-        reply_markup=transfer_complete_keyboard(),
-    )
-
-    logger.info(f"Transfer selection made: {count_text} from {channel_title}")
-
-    await state.clear()
     await callback.answer()
+    await _execute_transfer(callback.message, state, count, is_callback=True)
 
 
 # =============================================================================
@@ -379,7 +565,7 @@ async def process_post_count_selection(callback: CallbackQuery, state) -> None:
 @transfer_router.message(StateFilter(TransferStates.transfer_select_count))
 async def process_custom_post_count(message: Message, state) -> None:
     """
-    Process custom post count input.
+    Process custom post count input and start transfer.
 
     Args:
         message: User message with number
@@ -398,23 +584,7 @@ async def process_custom_post_count(message: Message, state) -> None:
         )
         return
 
-    data = await state.get_data()
-    channel_title = data.get("transfer_tg_channel_title", "Канал")
-    total_price = count * PRICE_PER_POST
-
-    await message.answer(
-        f"🚧 <b>Перенос будет реализован на следующем этапе</b>\n\n"
-        f"Канал: {channel_title}\n"
-        f"Выбрано: {count} постов\n"
-        f"Стоимость: {total_price} руб.\n\n"
-        f"Функционал переноса постов будет доступен после реализации Core Engine.",
-        parse_mode="HTML",
-        reply_markup=transfer_complete_keyboard(),
-    )
-
-    logger.info(f"Transfer custom count: {count} from {channel_title}")
-
-    await state.clear()
+    await _execute_transfer(message, state, count, is_callback=False)
 
 
 # No additional imports needed
