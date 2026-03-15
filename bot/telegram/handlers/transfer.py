@@ -113,9 +113,9 @@ async def process_transfer_tg_channel(message: Message, state, bot) -> None:
     bot_user = await bot.me()
     member = await bot.get_chat_member(chat.id, bot_user.id)
 
-    from aiogram.enums import ChatMemberAdministrator
+    from aiogram.enums import ChatMemberStatus
 
-    if member.status not in (ChatMemberAdministrator.ADMINISTRATOR, ChatMemberAdministrator.OWNER):
+    if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
         await message.answer(
             f"<b>📢 Канал найден: {chat.title}</b>\n\n"
             f"Для доступа к постам бота нужно добавить в администраторы.\n\n"
@@ -169,9 +169,9 @@ async def verify_admin_after_prompt(callback: CallbackQuery, state, bot) -> None
         bot_user = await bot.me()
         member = await bot.get_chat_member(channel_id, bot_user.id)
 
-        from aiogram.enums import ChatMemberAdministrator
+        from aiogram.enums import ChatMemberStatus
 
-        if member.status in (ChatMemberAdministrator.ADMINISTRATOR, ChatMemberAdministrator.OWNER):
+        if member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
             # Bot is admin - proceed to Max setup
             await _show_max_connection_instructions(callback.message, state, channel_title)
         else:
