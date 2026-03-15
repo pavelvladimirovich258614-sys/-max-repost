@@ -103,6 +103,7 @@ Returns:
 class MediaType:
     """Media type constants for Max upload."""
 
+    TEXT = "text"       # Text-only post (no media)
     PHOTO = "photo"
     VIDEO = "video"
     AUDIO = "audio"
@@ -122,7 +123,7 @@ def detect_media_type(message: Message) -> str:
         MediaType constant string
     """
     if not message.media:
-        return MediaType.PHOTO  # Text only
+        return MediaType.TEXT  # Text only, no media
 
     if isinstance(message.media, MessageMediaPhoto):
         return MediaType.PHOTO
@@ -417,16 +418,14 @@ class TransferEngine:
         media_type = detect_media_type(message)
         text = message.text or ""
 
-        # Handle text-only posts
-        if not message.media or media_type == MediaType.UNSUPPORTED:
-            await self.max_client.send_message(
-                chat_id=max_channel_id,
-                text=text,
-            )
-            return
-
-        # Handle media posts
+        # Handle posts based on media type
         match media_type:
+            case MediaType.TEXT:
+                # Text-only post - send without attachments
+                await self.max_client.send_message(
+                    chat_id=max_channel_id,
+                    text=text,
+                )
             case MediaType.PHOTO:
                 await self._transfer_photo(message, max_channel_id, text)
             case MediaType.VIDEO:
@@ -435,8 +434,14 @@ class TransferEngine:
                 await self._transfer_audio(message, max_channel_id, text)
             case MediaType.FILE:
                 await self._transfer_file(message, max_channel_id, text)
-            case _:
+            case MediaType.UNSUPPORTED:
                 # Unsupported - send as text only
+                await self.max_client.send_message(
+                    chat_id=max_channel_id,
+                    text=text,
+                )
+            case _:
+                # Fallback - send as text only
                 await self.max_client.send_message(
                     chat_id=max_channel_id,
                     text=text,

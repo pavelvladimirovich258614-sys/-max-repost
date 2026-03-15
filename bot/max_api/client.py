@@ -488,19 +488,27 @@ class MaxClient:
         data.add_field('data', file_content, filename='file')
 
         async with session.post(url, data=data) as response:
+            # Get response text for logging
+            response_text = await response.text()
+
+            logger.info(f"Upload response status: {response.status}")
+            logger.info(f"Upload response body: {response_text[:2000]}")  # Log first 2000 chars
+
             if response.status not in (200, 201, 202):
-                error_text = await response.text()
                 raise MaxAPIError(
-                    f"Upload failed with status {response.status}: {error_text}",
+                    f"Upload failed with status {response.status}: {response_text}",
                     status_code=response.status,
                 )
 
             # Parse response JSON
             try:
-                response_data = await response.json()
-            except aiohttp.ContentTypeError:
+                import json
+                response_data = json.loads(response_text)
+            except (json.JSONDecodeError, aiohttp.ContentTypeError):
+                logger.warning(f"Failed to parse JSON response, using empty dict")
                 response_data = {}
 
+            logger.info(f"Parsed response data keys: {list(response_data.keys()) if response_data else 'empty'}")
             return response_data if isinstance(response_data, dict) else {}
 
     async def upload_image(self, file_path: str | Path | bytes) -> str:
@@ -523,10 +531,20 @@ class MaxClient:
 
         # Step 2: Upload file and get token from response
         upload_response = await self._upload_file(upload_info.url, file_path)
+
+        logger.info(f"upload_image response: {upload_response}")
         token = upload_response.get("token", "")
 
         if not token:
-            raise MaxAPIError("Upload response did not contain token")
+            # Try alternative token fields
+            token = upload_response.get("upload_token", "")
+            if not token:
+                # Check if token is in a nested structure
+                if "data" in upload_response:
+                    token = upload_response["data"].get("token", "")
+
+            logger.error(f"Upload response did not contain 'token'. Response: {upload_response}")
+            raise MaxAPIError(f"Upload response did not contain token. Response keys: {list(upload_response.keys())}")
 
         # Pause for attachment processing
         await asyncio.sleep(self.upload_pause)
@@ -601,10 +619,20 @@ class MaxClient:
 
         # Step 2: Upload file and get token from response
         upload_response = await self._upload_file(upload_info.url, file_path)
+
+        logger.info(f"upload_file response: {upload_response}")
         token = upload_response.get("token", "")
 
         if not token:
-            raise MaxAPIError("Upload response did not contain token")
+            # Try alternative token fields
+            token = upload_response.get("upload_token", "")
+            if not token:
+                # Check if token is in a nested structure
+                if "data" in upload_response:
+                    token = upload_response["data"].get("token", "")
+
+            logger.error(f"Upload response did not contain 'token'. Response: {upload_response}")
+            raise MaxAPIError(f"Upload response did not contain token. Response keys: {list(upload_response.keys())}")
 
         # Pause for attachment processing
         await asyncio.sleep(self.upload_pause)
