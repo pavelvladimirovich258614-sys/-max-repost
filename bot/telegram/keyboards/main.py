@@ -1,6 +1,7 @@
 """Main inline keyboards for bot navigation."""
 
-from aiogram.types import InlineKeyboardBuilder, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
 def start_keyboard() -> InlineKeyboardMarkup:
