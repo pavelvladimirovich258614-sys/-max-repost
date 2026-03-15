@@ -15,6 +15,7 @@ class Settings(BaseSettings):
 
     # Telegram Bot
     telegram_bot_token: str = Field(..., alias="TELEGRAM_BOT_TOKEN")
+    admin_telegram_id: int = Field(..., alias="ADMIN_TELEGRAM_ID")
 
     # Max API (vk.com)
     max_access_token: str = Field(..., alias="MAX_ACCESS_TOKEN")
