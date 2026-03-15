@@ -161,43 +161,13 @@ async def callback_check_sub(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@start_router.callback_query(lambda c: c.data == "start_setup_transfer")
-async def callback_setup_transfer(callback: CallbackQuery) -> None:
-    """Handle 'Setup transfer' from start screen - redirects to transfer flow."""
-    # This callback is handled by transfer_router
-    # Just answer here to prevent stale callback
-    await callback.answer()
-
-
-@start_router.callback_query(lambda c: c.data == "start_setup_autopost")
-async def callback_setup_autopost(callback: CallbackQuery) -> None:
-    """Handle 'Setup auto-posting' from start screen - redirects to autopost flow."""
-    # This callback is handled by autopost_router
-    # Just answer here to prevent stale callback
-    await callback.answer()
-
-
 # =============================================================================
 # Menu Callbacks
 # =============================================================================
-
-
-@start_router.callback_query(lambda c: c.data == "menu_channels")
-async def callback_channels(callback: CallbackQuery) -> None:
-    """Handle 'My channels' button - redirected to channels router."""
-    await callback.answer()
-
-
-@start_router.callback_query(lambda c: c.data == "menu_new_transfer")
-async def callback_menu_new_transfer(callback: CallbackQuery) -> None:
-    """Handle 'New transfer' from menu - redirects to transfer router."""
-    await callback.answer()
-
-
-@start_router.callback_query(lambda c: c.data == "menu_new_autopost")
-async def callback_menu_new_autopost(callback: CallbackQuery) -> None:
-    """Handle 'New autopost' from menu - redirects to autopost router."""
-    await callback.answer()
+# Note: start_setup_transfer and start_setup_autopost are handled by
+# transfer_router and autopost_router respectively
+# Note: menu_channels, menu_new_transfer, menu_new_autopost are handled by
+# their respective routers (channels_router, transfer_router, autopost_router)
 
 
 @start_router.callback_query(lambda c: c.data == "menu_balance")
