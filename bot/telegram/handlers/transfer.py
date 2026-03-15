@@ -14,6 +14,8 @@ from bot.telegram.keyboards.transfer import (
     transfer_complete_keyboard,
 )
 from bot.max_api.client import MaxClient, MaxAPIError
+from bot.core.telethon_client import get_telethon_client
+from config.settings import settings
 
 
 # Bot configuration
@@ -272,10 +274,25 @@ async def process_transfer_max_channel(message: Message, state) -> None:
     # Get channel info
     data = await state.get_data()
     channel_title = data.get("transfer_tg_channel_title", "Канал")
+    channel_username = data.get("transfer_tg_channel_username", "")
 
-    # TODO: Analyze channel to count posts
-    # For now, use placeholder
-    post_count = 150  # Placeholder - will be calculated from real channel
+    # Count posts using Telethon (real count, not placeholder)
+    try:
+        telethon = get_telethon_client(
+            api_id=settings.telegram_api_id,
+            api_hash=settings.telegram_api_hash,
+            bot_token=settings.telegram_bot_token,
+        )
+        post_count = await telethon.count_channel_posts(channel_username)
+    except Exception as e:
+        logger.error(f"Error counting posts: {e}")
+        await message.answer(
+            "❌ Не удалось подсчитать посты в канале.\n\n"
+            f"Ошибка: {str(e)}\n\n"
+            "Убедитесь, что канал публичный и бот имеет к нему доступ.",
+            reply_markup=back_keyboard(),
+        )
+        return
 
     total_price = post_count * PRICE_PER_POST
 
