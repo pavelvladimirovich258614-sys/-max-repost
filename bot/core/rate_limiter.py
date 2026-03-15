@@ -1,113 +1,81 @@
-"""Rate limiter for API requests using token bucket algorithm."""
+"""Simple in-memory rate limiter using asyncio (without Redis for first stage)."""
 
 import asyncio
 import time
-from dataclasses import dataclass
+from collections import deque
 
-import redis.asyncio as aioredis
 from loguru import logger
 
 from config.settings import settings
 
 
-@dataclass
-class TokenBucketRateLimiter:
+class SimpleRateLimiter:
     """
-    Token bucket rate limiter using Redis.
+    Simple in-memory rate limiter using token bucket algorithm.
 
     Allows up to max_rps requests per second with burst capability.
-    Uses Redis for distributed rate limiting across multiple instances.
+    Uses asyncio for synchronization - no Redis required.
+
+    This is a simplified version for single-instance deployments.
+    For distributed systems, migrate to TokenBucketRateLimiter with Redis.
 
     Attributes:
-        redis_url: Redis connection URL
         max_rps: Maximum requests per second allowed
-        key: Redis key for storing bucket state
+        burst: Maximum burst size (default: max_rps * 2)
     """
 
-    redis_url: str
-    max_rps: int = 25
-    key: str = "rate_limit:max_api"
-
-    def __init__(self, redis_url: str | None = None, max_rps: int | None = None) -> None:
+    def __init__(self, max_rps: int | None = None, burst: int | None = None) -> None:
         """
         Initialize rate limiter.
 
         Args:
-            redis_url: Redis connection URL (defaults to settings.redis_url)
             max_rps: Maximum requests per second (defaults to settings.max_rps)
+            burst: Maximum burst size (defaults to max_rps * 2)
         """
-        self.redis_url = redis_url or settings.redis_url
         self.max_rps = max_rps or settings.max_rps
-        self.key = f"rate_limit:max_api:{self.max_rps}"
-        self._redis: aioredis.Redis | None = None
+        self.burst = burst or (self.max_rps * 2)
+
+        # Token bucket state
+        self._tokens: float = float(self.burst)
+        self._last_update: float = time.time()
         self._lock = asyncio.Lock()
 
-    async def _get_redis(self) -> aioredis.Redis:
-        """
-        Get or create Redis connection.
+        logger.debug(f"RateLimiter initialized: {self.max_rps} rps, burst={self.burst}")
 
-        Returns:
-            Redis connection
+    async def _refill_tokens(self) -> None:
         """
-        if self._redis is None:
-            self._redis = await aioredis.from_url(
-                self.redis_url,
-                encoding="utf-8",
-                decode_responses=True,
-            )
-        return self._redis
+        Refill tokens based on elapsed time.
 
-    async def _get_token(self) -> bool:
+        Token bucket algorithm: tokens accumulate at max_rps rate
+        up to the burst capacity.
         """
-        Try to acquire a token from the bucket.
+        now = time.time()
+        elapsed = now - self._last_update
 
-        Uses Redis INCR with expiration to implement token bucket.
-        Each token represents one request permit.
+        # Calculate new tokens (rate * time)
+        new_tokens = elapsed * self.max_rps
+
+        # Add tokens, but don't exceed burst capacity
+        self._tokens = min(self.burst, self._tokens + new_tokens)
+        self._last_update = now
+
+    async def acquire(self) -> bool:
+        """
+        Try to acquire a token.
 
         Returns:
             True if token acquired, False otherwise
         """
-        redis = await self._get_redis()
+        async with self._lock:
+            await self._refill_tokens()
 
-        # Current timestamp in milliseconds
-        now = int(time.time() * 1000)
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                logger.trace(f"Token acquired: {self._tokens:.1f} remaining")
+                return True
 
-        # Redis pipeline for atomic operations
-        pipe = redis.pipeline()
-
-        # Get current count
-        pipe.get(f"{self.key}:count")
-        # Get last reset time
-        pipe.get(f"{self.key}:reset")
-
-        results = await pipe.execute()
-
-        count = int(results[0] or 0)
-        last_reset = int(results[1] or 0)
-
-        # Check if we need to reset (new second window)
-        window_start = now - (now % 1000)
-        if last_reset < window_start:
-            # New window - reset counter
-            async with self._lock:
-                # Double-check after acquiring lock
-                current_reset = await redis.get(f"{self.key}:reset")
-                if current_reset is None or int(current_reset) < window_start:
-                    await redis.set(f"{self.key}:count", "0", px=2000)
-                    await redis.set(f"{self.key}:reset", str(window_start), px=2000)
-                    count = 0
-
-        # Try to increment
-        new_count = await redis.incr(f"{self.key}:count")
-
-        if new_count > self.max_rps:
-            # Too many requests - decrement back
-            await redis.decr(f"{self.key}:count")
-            logger.debug(f"Rate limit exceeded: {new_count}/{self.max_rps}")
+            logger.trace(f"No tokens available: {self._tokens:.1f}")
             return False
-
-        logger.trace(f"Token acquired: {new_count}/{self.max_rps}")
-        return True
 
     async def wait(self) -> None:
         """
@@ -120,7 +88,7 @@ class TokenBucketRateLimiter:
         start_time = time.time()
 
         while True:
-            if await self._get_token():
+            if await self.acquire():
                 return
 
             # Check timeout
@@ -129,17 +97,22 @@ class TokenBucketRateLimiter:
                 logger.warning(f"Rate limiter timeout after {max_wait}s")
                 raise TimeoutError(f"Rate limiter timeout: waited {max_wait}s without token")
 
-            # Small delay before retry (exponential backoff within window)
-            delay = min(0.1, elapsed * 0.1)
-            await asyncio.sleep(delay)
+            # Calculate time needed for one token
+            # If we have partial tokens, wait less. If empty, wait for full token.
+            async with self._lock:
+                tokens_needed = 1.0 - self._tokens
+                wait_time = tokens_needed / self.max_rps if tokens_needed > 0 else 0.01
+
+            # Cap wait time to avoid long sleeps
+            wait_time = min(max(wait_time, 0.01), 0.5)
+
+            await asyncio.sleep(wait_time)
 
     async def close(self) -> None:
-        """Close Redis connection."""
-        if self._redis is not None:
-            await self._redis.close()
-            self._redis = None
+        """Cleanup (no-op for in-memory limiter)."""
+        pass
 
-    async def __aenter__(self) -> "TokenBucketRateLimiter":
+    async def __aenter__(self) -> "SimpleRateLimiter":
         """Context manager entry."""
         return self
 
@@ -148,5 +121,6 @@ class TokenBucketRateLimiter:
         await self.close()
 
 
-# Backward compatibility alias
-RateLimiter = TokenBucketRateLimiter
+# Backward compatibility aliases
+TokenBucketRateLimiter = SimpleRateLimiter
+RateLimiter = SimpleRateLimiter

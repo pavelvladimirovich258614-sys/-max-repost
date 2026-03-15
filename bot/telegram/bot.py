@@ -7,7 +7,12 @@ from aiogram.fsm.storage.redis import RedisStorage
 
 from config.settings import settings
 from bot.telegram.middlewares.db import DBMiddleware
+
+# Import all routers
 from bot.telegram.handlers.start import start_router
+from bot.telegram.handlers.autopost import autopost_router
+from bot.telegram.handlers.transfer import transfer_router
+from bot.telegram.handlers.channels import channels_router
 
 
 def create_bot() -> Bot:
@@ -44,6 +49,9 @@ def setup_dispatcher(bot: Bot) -> Dispatcher:
 
     # Register routers (order matters - more specific first)
     dp.include_router(start_router)
+    dp.include_router(autopost_router)
+    dp.include_router(transfer_router)
+    dp.include_router(channels_router)
 
     # Setup lifecycle handlers
     @dp.startup()
