@@ -1,0 +1,54 @@
+"""Application settings using Pydantic Settings."""
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Application configuration loaded from environment variables."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # Telegram Bot
+    telegram_bot_token: str = Field(..., alias="TELEGRAM_BOT_TOKEN")
+
+    # Max API (vk.com)
+    max_access_token: str = Field(..., alias="MAX_ACCESS_TOKEN")
+
+    # Database
+    database_url: str = Field(
+        default="postgresql+asyncpg://maxrepost:maxrepost@localhost:5432/maxrepost",
+        alias="DATABASE_URL",
+    )
+
+    # Redis
+    redis_url: str = Field(
+        default="redis://localhost:6379/0",
+        alias="REDIS_URL",
+    )
+
+    # YooKassa Payment
+    yookassa_shop_id: str = Field(..., alias="YOOKASSA_SHOP_ID")
+    yookassa_secret_key: str = Field(..., alias="YOOKASSA_SECRET_KEY")
+
+    # Logging
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    debug: bool = Field(default=False, alias="DEBUG")
+
+    # Rate Limiting
+    max_rps: int = Field(default=25, alias="MAX_RPS")
+
+    # Bonus Channel
+    bonus_channel: str = Field(..., alias="BONUS_CHANNEL")
+
+    # Pricing
+    price_per_post: int = Field(default=3, alias="PRICE_PER_POST")
+    free_posts_bonus: int = Field(default=10, alias="FREE_POSTS_BONUS")
+
+
+# Global settings instance
+settings = Settings()
