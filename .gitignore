@@ -71,3 +71,7 @@ Thumbs.db
 
 # Alembic
 alembic/versions/*.pyc
+
+# Telethon session files
+*.session
+*.session-journal

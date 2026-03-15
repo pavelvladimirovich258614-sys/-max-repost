@@ -281,7 +281,7 @@ async def process_transfer_max_channel(message: Message, state) -> None:
         telethon = get_telethon_client(
             api_id=settings.telegram_api_id,
             api_hash=settings.telegram_api_hash,
-            bot_token=settings.telegram_bot_token,
+            phone=settings.telegram_phone,
         )
         post_count = await telethon.count_channel_posts(channel_username)
     except Exception as e:

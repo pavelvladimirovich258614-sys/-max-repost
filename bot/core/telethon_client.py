@@ -1,14 +1,23 @@
 """Telethon client for reading Telegram channel history.
 
 Telethon uses MTProto API (unlike aiogram's Bot API), which allows
-reading full channel history - something Bot API cannot do.
+reading full channel history via GetHistoryRequest - something Bot API cannot do.
+
+IMPORTANT: GetHistoryRequest requires a USER session, not bot token.
+Run scripts/auth_telethon.py once to authorize and create the session file.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 from telethon import TelegramClient
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage
+from telethon.errors import SessionPasswordNeededError
 from loguru import logger
+
+
+# Session file path
+SESSION_FILE = "user_session"
 
 
 @dataclass
@@ -24,25 +33,32 @@ class PostInfo:
 
 class TelethonChannelClient:
     """
-    Telethon-based client for reading public Telegram channel history.
+    Telethon-based client for reading Telegram channel history.
 
-    Uses bot session (bot token) for accessing public channels.
-    For private channels, a user session would be required.
+    Uses USER session (phone-based auth) because GetHistoryRequest
+    is not available for bot accounts.
+
+    Session is saved to file after first authorization via scripts/auth_telethon.py
     """
 
-    def __init__(self, api_id: int, api_hash: str, bot_token: str):
+    def __init__(self, api_id: int, api_hash: str, phone: str):
         """
-        Initialize Telethon client with bot token.
+        Initialize Telethon client with user credentials.
 
         Args:
             api_id: Telegram API ID from https://my.telegram.org
             api_hash: Telegram API Hash from https://my.telegram.org
-            bot_token: Bot token (same as used in aiogram)
+            phone: Phone number for user session (e.g., +7XXXXXXXXXX)
         """
         self.api_id = api_id
         self.api_hash = api_hash
-        self.bot_token = bot_token
+        self.phone = phone
         self._client: Optional[TelegramClient] = None
+        self._session_path = Path(SESSION_FILE + ".session")
+
+    def _is_session_exists(self) -> bool:
+        """Check if session file exists."""
+        return self._session_path.exists()
 
     async def _get_client(self) -> TelegramClient:
         """
@@ -51,20 +67,41 @@ class TelethonChannelClient:
         Returns:
             TelegramClient instance
 
-        Note:
-            Using bot token connection. Bot sessions can read public channels
-            they are members of. For private channels, user session is needed.
+        Raises:
+            RuntimeError: If session file doesn't exist (needs auth via script)
         """
         if self._client is None:
-            # Create bot session using bot token
-            # Format: bot_token is parsed by Telethon automatically
+            # Check if session file exists
+            if not self._is_session_exists():
+                logger.error(
+                    f"Telethon session file not found: {self._session_path}\n"
+                    f"Run 'python scripts/auth_telethon.py' to authorize."
+                )
+                raise RuntimeError(
+                    "No Telethon session found. "
+                    "Run 'python scripts/auth_telethon.py' to authorize."
+                )
+
+            # Create client with existing session file
             self._client = TelegramClient(
-                session='bot_session',
+                session=SESSION_FILE,
                 api_id=self.api_id,
                 api_hash=self.api_hash,
             )
-            await self._client.start(bot_token=self.bot_token)
-            logger.info("Telethon client started with bot session")
+
+            # Connect with saved session (no code needed)
+            await self._client.connect()
+
+            # Verify session is valid
+            if not await self._client.is_user_authorized():
+                logger.error("Session exists but user is not authorized. "
+                           "Delete session file and run auth script again.")
+                raise RuntimeError(
+                    "Session invalid. Delete user_session.session and "
+                    "run 'python scripts/auth_telethon.py' again."
+                )
+
+            logger.info(f"Telethon connected with user session: {self.phone}")
         return self._client
 
     async def close(self) -> None:
@@ -76,7 +113,7 @@ class TelethonChannelClient:
 
     async def count_channel_posts(self, channel_username: str) -> int:
         """
-        Count total posts in a public Telegram channel.
+        Count total posts in a Telegram channel.
 
         Args:
             channel_username: Channel username (with or without @)
@@ -182,19 +219,19 @@ class TelethonChannelClient:
 _client_instance: Optional[TelethonChannelClient] = None
 
 
-def get_telethon_client(api_id: int, api_hash: str, bot_token: str) -> TelethonChannelClient:
+def get_telethon_client(api_id: int, api_hash: str, phone: str) -> TelethonChannelClient:
     """
     Get singleton Telethon client instance.
 
     Args:
         api_id: Telegram API ID
         api_hash: Telegram API Hash
-        bot_token: Bot token
+        phone: Phone number for user session
 
     Returns:
         TelethonChannelClient instance
     """
     global _client_instance
     if _client_instance is None:
-        _client_instance = TelethonChannelClient(api_id, api_hash, bot_token)
+        _client_instance = TelethonChannelClient(api_id, api_hash, phone)
     return _client_instance

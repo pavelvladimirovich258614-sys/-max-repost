@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     # Telegram API (for Telethon - user session)
     telegram_api_id: int = Field(..., alias="TELEGRAM_API_ID")
     telegram_api_hash: str = Field(..., alias="TELEGRAM_API_HASH")
+    telegram_phone: str = Field(..., alias="TELEGRAM_PHONE")
 
     # Max API (vk.com)
     max_access_token: str = Field(..., alias="MAX_ACCESS_TOKEN")
