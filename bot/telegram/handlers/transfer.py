@@ -98,50 +98,38 @@ async def process_transfer_tg_channel(message: Message, state, bot) -> None:
     # Store channel username in state
     await state.update_data(transfer_tg_channel_username=channel_username)
 
-    try:
-        # Try to get chat info
-        chat = await bot.get_chat(f"@{channel_username}")
+    # TEMP: Let exceptions propagate to see full traceback
+    # Try to get chat info
+    chat = await bot.get_chat(f"@{channel_username}")
 
-        # Store chat info
-        await state.update_data(
-            transfer_tg_channel_id=str(chat.id),
-            transfer_tg_channel_title=chat.title,
-            transfer_tg_channel_username=channel_username,
-        )
+    # Store chat info
+    await state.update_data(
+        transfer_tg_channel_id=str(chat.id),
+        transfer_tg_channel_title=chat.title,
+        transfer_tg_channel_username=channel_username,
+    )
 
-        # Check if bot is admin (required for accessing channel history)
-        bot_user = await bot.me()
-        member = await bot.get_chat_member(chat.id, bot_user.id)
+    # Check if bot is admin (required for accessing channel history)
+    bot_user = await bot.me()
+    member = await bot.get_chat_member(chat.id, bot_user.id)
 
-        from aiogram.enums import ChatMemberAdministrator
+    from aiogram.enums import ChatMemberAdministrator
 
-        if member.status not in (ChatMemberAdministrator.ADMINISTRATOR, ChatMemberAdministrator.OWNER):
-            await message.answer(
-                f"<b>📢 Канал найден: {chat.title}</b>\n\n"
-                f"Для доступа к постам бота нужно добавить в администраторы.\n\n"
-                f"<b>Инструкция:</b>\n"
-                f"1. Откройте настройки канала ➡ Администраторы.\n"
-                f"2. Добавьте @{TG_BOT_USERNAME} как администратора.\n"
-                f"3. Сохраните изменения и нажмите «Продолжить».",
-                parse_mode="HTML",
-                reply_markup=_build_continue_keyboard(),
-            )
-            await state.set_state(TransferStates.transfer_waiting_verification)
-        else:
-            # Bot is already admin - skip to Max connection
-            await _show_max_connection_instructions(message, state, chat.title)
-
-    except Exception as e:
-        logger.error(f"Error getting chat info: {e}")
+    if member.status not in (ChatMemberAdministrator.ADMINISTRATOR, ChatMemberAdministrator.OWNER):
         await message.answer(
-            "❌ Канал не найден. Проверьте, что:\n"
-            "• Ссылка правильная\n"
-            "• Канал публичный (есть username)\n"
-            "• Бот имеет доступ к каналу\n\n"
-            "Попробуйте снова:",
-            reply_markup=back_to_start_keyboard(),
+            f"<b>📢 Канал найден: {chat.title}</b>\n\n"
+            f"Для доступа к постам бота нужно добавить в администраторы.\n\n"
+            f"<b>Инструкция:</b>\n"
+            f"1. Откройте настройки канала ➡ Администраторы.\n"
+            f"2. Добавьте @{TG_BOT_USERNAME} как администратора.\n"
+            f"3. Сохраните изменения и нажмите «Продолжить».",
+            parse_mode="HTML",
+            reply_markup=_build_continue_keyboard(),
         )
-        await state.clear()
+        await state.set_state(TransferStates.transfer_waiting_verification)
+    else:
+        # Bot is already admin - skip to Max connection
+        await _show_max_connection_instructions(message, state, chat.title)
 
 
 def _build_continue_keyboard() -> InlineKeyboardMarkup:

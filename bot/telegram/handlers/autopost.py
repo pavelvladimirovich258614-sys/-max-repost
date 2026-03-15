@@ -93,43 +93,30 @@ async def process_tg_channel_link(message: Message, state, bot) -> None:
     # Store channel username in state
     await state.update_data(tg_channel_username=channel_username)
 
-    try:
-        # Try to get chat info
-        chat = await bot.get_chat(f"@{channel_username}")
+    # TEMP: Let exceptions propagate to see full traceback
+    chat = await bot.get_chat(f"@{channel_username}")
 
-        # Store chat info
-        await state.update_data(
-            tg_channel_id=str(chat.id),
-            tg_channel_title=chat.title,
-            tg_channel_username=channel_username,
-        )
+    # Store chat info
+    await state.update_data(
+        tg_channel_id=str(chat.id),
+        tg_channel_title=chat.title,
+        tg_channel_username=channel_username,
+    )
 
-        await message.answer(
-            f"<b>📢 Канал найден: {chat.title}</b>\n\n"
-            f"Для автопостинга необходимо назначить бота администратором канала.\n\n"
-            f"<b>Инструкция:</b>\n"
-            f"1. Откройте настройки канала ➡ Администраторы.\n"
-            f"2. Добавьте @{TG_BOT_USERNAME} как администратора. "
-            f"<b>Никаких разрешений для бота включать не нужно!</b>\n"
-            f"3. Сохраните изменения.\n"
-            f"4. Нажмите «Проверить».",
-            parse_mode="HTML",
-            reply_markup=check_admin_keyboard(),
-        )
+    await message.answer(
+        f"<b>📢 Канал найден: {chat.title}</b>\n\n"
+        f"Для автопостинга необходимо назначить бота администратором канала.\n\n"
+        f"<b>Инструкция:</b>\n"
+        f"1. Откройте настройки канала ➡ Администраторы.\n"
+        f"2. Добавьте @{TG_BOT_USERNAME} как администратора. "
+        f"<b>Никаких разрешений для бота включать не нужно!</b>\n"
+        f"3. Сохраните изменения.\n"
+        f"4. Нажмите «Проверить».",
+        parse_mode="HTML",
+        reply_markup=check_admin_keyboard(),
+    )
 
-        await state.set_state(AutopostStates.waiting_tg_admin_check)
-
-    except Exception as e:
-        logger.error(f"Error getting chat info: {e}")
-        await message.answer(
-            "❌ Канал не найден. Проверьте, что:\n"
-            "• Ссылка правильная\n"
-            "• Канал публичный (есть username)\n"
-            "• Бот имеет доступ к каналу\n\n"
-            "Попробуйте снова:",
-            reply_markup=back_to_menu_keyboard(),
-        )
-        await state.clear()
+    await state.set_state(AutopostStates.waiting_tg_admin_check)
 
 
 @autopost_router.callback_query(lambda c: c.data == "autopost_check_admin", StateFilter(AutopostStates.waiting_tg_admin_check))
