@@ -1,5 +1,6 @@
 """Post transfer handler - FSM flow for manual post transfer from TG to Max."""
 
+import re
 import time
 from typing import Optional
 
@@ -20,6 +21,35 @@ from bot.max_api.client import MaxClient, MaxAPIError
 from bot.core.telethon_client import get_telethon_client
 from bot.core.transfer_engine import TransferEngine, TransferResult
 from config.settings import settings
+
+
+# =============================================================================
+# Utilities
+# =============================================================================
+
+
+def _strip_html(text: str, max_length: int = 200) -> str:
+    """
+    Remove HTML tags from text and truncate.
+
+    Args:
+        text: Text that may contain HTML
+        max_length: Maximum length of returned text
+
+    Returns:
+        Clean text without HTML tags
+    """
+    if not text:
+        return ""
+
+    # Remove HTML tags
+    clean = re.sub(r'<[^>]+>', ' ', text)
+    # Remove extra whitespace
+    clean = re.sub(r'\s+', ' ', clean).strip()
+    # Truncate if too long
+    if len(clean) > max_length:
+        clean = clean[:max_length] + "..."
+    return clean
 
 
 # Bot configuration
@@ -345,7 +375,7 @@ async def _execute_transfer(
 
         if result.errors:
             error_summary = "\n\n".join(
-                f"• Пост {e.post_id}: {e.error_message}"
+                f"• Пост {e.post_id}: {_strip_html(e.error_message, 100)}"
                 for e in result.errors[:3]  # Show first 3 errors
             )
             if len(result.errors) > 3:
@@ -372,10 +402,12 @@ async def _execute_transfer(
 
     except MaxAPIError as e:
         logger.error(f"Max API error during transfer: {e}")
+        # Clean error message - remove HTML tags
+        clean_error = _strip_html(str(e))
         error_text = (
             f"❌ <b>Ошибка переноса</b>\n\n"
             f"Канал: {channel_title}\n\n"
-            f"Ошибка API Max: {str(e)}\n\n"
+            f"Ошибка: {clean_error}\n\n"
             f"Проверьте:\n"
             f"• Бот «Репост» добавлен в канал Max\n"
             f"• Боту выданы права «Писать посты»"
