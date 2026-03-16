@@ -307,6 +307,10 @@ class MaxClient:
                         if error_code == "attachment.not.ready":
                             raise AttachmentNotReadyError(error_msg)
 
+                        # Log full response body for debugging 400 errors
+                        response_text = await response.text() if hasattr(response, 'text') else str(data)
+                        logger.error(f"Client error {response.status}: {response_text}")
+
                         # Other client errors
                         raise MaxAPIError(
                             error_msg or f"Client error {response.status}",
@@ -426,6 +430,9 @@ class MaxClient:
         max_retries = 3
         retry_delay = 2.0
 
+        # Log request details for debugging
+        logger.info(f"send_message request: chat_id={chat_id}, text={text[:100]!r}, params={{'chat_id': chat_id}}, payload={payload}")
+
         for attempt in range(max_retries):
             try:
                 # Use query parameter for chat_id - pass via params for proper URL encoding
@@ -442,6 +449,9 @@ class MaxClient:
                     await asyncio.sleep(retry_delay)
                 else:
                     raise e
+            except MaxAPIError as e:
+                logger.error(f"send_message error: {e}, status_code={e.status_code}, response_data={e.response_data}")
+                raise
 
     async def _upload_initiate(self, media_type: MediaType) -> UploadResponse:
         """
@@ -475,6 +485,7 @@ class MaxClient:
         Upload file content to the provided URL using multipart/form-data.
 
         Max API spec: POST {url} with multipart/form-data, field name="data"
+        IMPORTANT: Upload URL is pre-signed, no Authorization header needed.
 
         Args:
             url: Upload URL from initiate step
@@ -499,41 +510,50 @@ class MaxClient:
         else:
             file_content = file_path
 
+        # Log file info for debugging
+        logger.info(f"Uploading file: {filename}, content_type: {content_type}, size: {len(file_content)} bytes")
+        logger.info(f"First 4 bytes: {file_content[:4]}")
+
+        if not file_content or len(file_content) == 0:
+            raise MaxAPIError("Cannot upload empty file")
+
         # Upload using POST with multipart/form-data
-        session = await self._get_session()
+        # Use a CLEAN session without Authorization header - upload URL is pre-signed
+        timeout = aiohttp.ClientTimeout(total=60, connect=10)
+        async with aiohttp.ClientSession(timeout=timeout) as upload_session:
+            # Prepare multipart form data with proper filename and content_type
+            form = aiohttp.FormData()
+            form.add_field(
+                'data',           # Field name must be exactly "data" per Max API spec
+                file_content,
+                filename=filename,
+                content_type=content_type,
+            )
 
-        # Prepare multipart form data with proper filename and content_type
-        form = aiohttp.FormData()
-        form.add_field(
-            'data',           # Field name must be exactly "data" per Max API spec
-            file_content,
-            filename=filename,
-            content_type=content_type,
-        )
+            # NO custom headers - let aiohttp set Content-Type with proper boundary
+            async with upload_session.post(url, data=form) as response:
+                # Get response text for logging
+                response_text = await response.text()
 
-        async with session.post(url, data=form) as response:
-            # Get response text for logging
-            response_text = await response.text()
+                logger.info(f"Upload response status: {response.status}")
+                logger.info(f"Upload response body: {response_text[:2000]}")  # Log first 2000 chars
 
-            logger.info(f"Upload response status: {response.status}")
-            logger.info(f"Upload response body: {response_text[:2000]}")  # Log first 2000 chars
+                if response.status not in (200, 201, 202):
+                    raise MaxAPIError(
+                        f"Upload failed with status {response.status}: {response_text}",
+                        status_code=response.status,
+                    )
 
-            if response.status not in (200, 201, 202):
-                raise MaxAPIError(
-                    f"Upload failed with status {response.status}: {response_text}",
-                    status_code=response.status,
-                )
+                # Parse response JSON
+                try:
+                    import json
+                    response_data = json.loads(response_text)
+                except (json.JSONDecodeError, aiohttp.ContentTypeError):
+                    logger.warning(f"Failed to parse JSON response, using empty dict")
+                    response_data = {}
 
-            # Parse response JSON
-            try:
-                import json
-                response_data = json.loads(response_text)
-            except (json.JSONDecodeError, aiohttp.ContentTypeError):
-                logger.warning(f"Failed to parse JSON response, using empty dict")
-                response_data = {}
-
-            logger.info(f"Parsed response data keys: {list(response_data.keys()) if response_data else 'empty'}")
-            return response_data if isinstance(response_data, dict) else {}
+                logger.info(f"Parsed response data keys: {list(response_data.keys()) if response_data else 'empty'}")
+                return response_data if isinstance(response_data, dict) else {}
 
     async def upload_image(self, file_path: str | Path | bytes) -> str:
         """

@@ -9,6 +9,7 @@ This module handles the complete transfer workflow:
 """
 
 import asyncio
+import io
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -453,13 +454,17 @@ class TransferEngine:
         text: str,
     ) -> None:
         """Transfer a photo post."""
-        # Download photo to bytes - Telethon returns bytes when passed 'bytes' arg
-        photo_bytes = await message.download_media(bytes)
+        # Download photo to BytesIO - Telethon returns bytes when passed BytesIO
+        buf = io.BytesIO()
+        await message.download_media(file=buf)
+        buf.seek(0)
+        photo_bytes = buf.read()
 
-        if not photo_bytes:
-            raise MaxAPIError("Failed to download photo")
+        if not photo_bytes or len(photo_bytes) == 0:
+            logger.warning(f"Empty photo bytes for message {message.id}, skipping")
+            raise MaxAPIError("Failed to download photo: empty bytes")
 
-        logger.info(f"Downloaded photo: {len(photo_bytes)} bytes")
+        logger.info(f"Downloaded photo: {len(photo_bytes)} bytes, first 4: {photo_bytes[:4]}")
 
         # Upload to Max
         token = await self.max_client.upload_image(photo_bytes)
@@ -479,13 +484,17 @@ class TransferEngine:
         text: str,
     ) -> None:
         """Transfer a video post."""
-        # Download video to bytes - Telethon returns bytes when passed 'bytes' arg
-        video_bytes = await message.download_media(bytes)
+        # Download video to BytesIO
+        buf = io.BytesIO()
+        await message.download_media(file=buf)
+        buf.seek(0)
+        video_bytes = buf.read()
 
-        if not video_bytes:
-            raise MaxAPIError("Failed to download video")
+        if not video_bytes or len(video_bytes) == 0:
+            logger.warning(f"Empty video bytes for message {message.id}, skipping")
+            raise MaxAPIError("Failed to download video: empty bytes")
 
-        logger.info(f"Downloaded video: {len(video_bytes)} bytes")
+        logger.info(f"Downloaded video: {len(video_bytes)} bytes, first 4: {video_bytes[:4]}")
 
         # Upload to Max
         token = await self.max_client.upload_video(video_bytes)
@@ -505,13 +514,17 @@ class TransferEngine:
         text: str,
     ) -> None:
         """Transfer an audio post."""
-        # Download audio to bytes - Telethon returns bytes when passed 'bytes' arg
-        audio_bytes = await message.download_media(bytes)
+        # Download audio to BytesIO
+        buf = io.BytesIO()
+        await message.download_media(file=buf)
+        buf.seek(0)
+        audio_bytes = buf.read()
 
-        if not audio_bytes:
-            raise MaxAPIError("Failed to download audio")
+        if not audio_bytes or len(audio_bytes) == 0:
+            logger.warning(f"Empty audio bytes for message {message.id}, skipping")
+            raise MaxAPIError("Failed to download audio: empty bytes")
 
-        logger.info(f"Downloaded audio: {len(audio_bytes)} bytes")
+        logger.info(f"Downloaded audio: {len(audio_bytes)} bytes, first 4: {audio_bytes[:4]}")
 
         # Upload to Max
         token = await self.max_client.upload_audio(audio_bytes)
@@ -531,13 +544,17 @@ class TransferEngine:
         text: str,
     ) -> None:
         """Transfer a file/document post."""
-        # Download file to bytes - Telethon returns bytes when passed 'bytes' arg
-        file_bytes = await message.download_media(bytes)
+        # Download file to BytesIO
+        buf = io.BytesIO()
+        await message.download_media(file=buf)
+        buf.seek(0)
+        file_bytes = buf.read()
 
-        if not file_bytes:
-            raise MaxAPIError("Failed to download file")
+        if not file_bytes or len(file_bytes) == 0:
+            logger.warning(f"Empty file bytes for message {message.id}, skipping")
+            raise MaxAPIError("Failed to download file: empty bytes")
 
-        logger.info(f"Downloaded file: {len(file_bytes)} bytes")
+        logger.info(f"Downloaded file: {len(file_bytes)} bytes, first 4: {file_bytes[:4]}")
 
         # Upload to Max
         token = await self.max_client.upload_file(file_bytes)
