@@ -582,7 +582,20 @@ class MaxClient:
         )
 
         logger.info(f"upload_image response: {upload_response}")
-        token = upload_response.get("token", "")
+        token = ""
+
+        # Ответ для image имеет структуру: {"photos": {"<hash>": {"token": "..."}}}
+        if "photos" in upload_response:
+            photos = upload_response["photos"]
+            if photos:
+                # Берём первый (и единственный) ключ
+                first_key = next(iter(photos))
+                token = photos[first_key].get("token", "")
+                logger.info(f"Found token in photos['{first_key}']: {token[:20] if token else 'empty'}...")
+
+        # Fallback — старая логика для обратной совместимости
+        if not token:
+            token = upload_response.get("token", "")
 
         if not token:
             # Try alternative token fields
@@ -618,7 +631,7 @@ class MaxClient:
             MaxAPIError: On upload failure
         """
         upload_info = await self._upload_initiate(MediaType.VIDEO)
-        await self._upload_file(
+        upload_response = await self._upload_file(
             upload_info.url,
             file_path,
             filename='video.mp4',
@@ -628,8 +641,21 @@ class MaxClient:
         # Pause for attachment processing
         await asyncio.sleep(self.upload_pause)
 
-        logger.debug(f"Video uploaded, token: {upload_info.token}")
-        return upload_info.token
+        # По документации токен для video приходит на шаге 1 (upload_info.token)
+        # Но проверим и ответ шага 2 на случай вложенной структуры
+        token = upload_info.token
+        if not token and "videos" in upload_response:
+            videos = upload_response["videos"]
+            if videos:
+                first_key = next(iter(videos))
+                token = videos[first_key].get("token", "")
+                logger.info(f"Found video token in videos['{first_key}']: {token[:20] if token else 'empty'}...")
+
+        if not token:
+            token = upload_response.get("token", upload_info.token)
+
+        logger.debug(f"Video uploaded, token: {token[:20] if token else 'empty'}...")
+        return token
 
     async def upload_audio(self, file_path: str | Path | bytes) -> str:
         """
@@ -645,7 +671,7 @@ class MaxClient:
             MaxAPIError: On upload failure
         """
         upload_info = await self._upload_initiate(MediaType.AUDIO)
-        await self._upload_file(
+        upload_response = await self._upload_file(
             upload_info.url,
             file_path,
             filename='audio.mp3',
@@ -655,8 +681,21 @@ class MaxClient:
         # Pause for attachment processing
         await asyncio.sleep(self.upload_pause)
 
-        logger.debug(f"Audio uploaded, token: {upload_info.token}")
-        return upload_info.token
+        # По документации токен для audio приходит на шаге 1 (upload_info.token)
+        # Но проверим и ответ шага 2 на случай вложенной структуры
+        token = upload_info.token
+        if not token and "audios" in upload_response:
+            audios = upload_response["audios"]
+            if audios:
+                first_key = next(iter(audios))
+                token = audios[first_key].get("token", "")
+                logger.info(f"Found audio token in audios['{first_key}']: {token[:20] if token else 'empty'}...")
+
+        if not token:
+            token = upload_response.get("token", upload_info.token)
+
+        logger.debug(f"Audio uploaded, token: {token[:20] if token else 'empty'}...")
+        return token
 
     async def upload_file(self, file_path: str | Path | bytes) -> str:
         """
@@ -685,7 +724,20 @@ class MaxClient:
         )
 
         logger.info(f"upload_file response: {upload_response}")
-        token = upload_response.get("token", "")
+        token = ""
+
+        # Ответ для file может иметь структуру: {"files": {"<hash>": {"token": "..."}}}
+        if "files" in upload_response:
+            files = upload_response["files"]
+            if files:
+                # Берём первый (и единственный) ключ
+                first_key = next(iter(files))
+                token = files[first_key].get("token", "")
+                logger.info(f"Found token in files['{first_key}']: {token[:20] if token else 'empty'}...")
+
+        # Fallback — старая логика для обратной совместимости
+        if not token:
+            token = upload_response.get("token", "")
 
         if not token:
             # Try alternative token fields
