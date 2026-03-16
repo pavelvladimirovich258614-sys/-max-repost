@@ -12,7 +12,6 @@ import asyncio
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -454,11 +453,13 @@ class TransferEngine:
         text: str,
     ) -> None:
         """Transfer a photo post."""
-        # Download photo to bytes
-        photo_bytes = await message.download_media(file=BytesIO())
+        # Download photo to bytes - Telethon returns bytes when passed 'bytes' arg
+        photo_bytes = await message.download_media(bytes)
 
         if not photo_bytes:
             raise MaxAPIError("Failed to download photo")
+
+        logger.info(f"Downloaded photo: {len(photo_bytes)} bytes")
 
         # Upload to Max
         token = await self.max_client.upload_image(photo_bytes)
@@ -478,11 +479,13 @@ class TransferEngine:
         text: str,
     ) -> None:
         """Transfer a video post."""
-        # Download video to bytes
-        video_bytes = await message.download_media(file=BytesIO())
+        # Download video to bytes - Telethon returns bytes when passed 'bytes' arg
+        video_bytes = await message.download_media(bytes)
 
         if not video_bytes:
             raise MaxAPIError("Failed to download video")
+
+        logger.info(f"Downloaded video: {len(video_bytes)} bytes")
 
         # Upload to Max
         token = await self.max_client.upload_video(video_bytes)
@@ -502,11 +505,13 @@ class TransferEngine:
         text: str,
     ) -> None:
         """Transfer an audio post."""
-        # Download audio to bytes
-        audio_bytes = await message.download_media(file=BytesIO())
+        # Download audio to bytes - Telethon returns bytes when passed 'bytes' arg
+        audio_bytes = await message.download_media(bytes)
 
         if not audio_bytes:
             raise MaxAPIError("Failed to download audio")
+
+        logger.info(f"Downloaded audio: {len(audio_bytes)} bytes")
 
         # Upload to Max
         token = await self.max_client.upload_audio(audio_bytes)
@@ -526,11 +531,13 @@ class TransferEngine:
         text: str,
     ) -> None:
         """Transfer a file/document post."""
-        # Download file to bytes
-        file_bytes = await message.download_media(file=BytesIO())
+        # Download file to bytes - Telethon returns bytes when passed 'bytes' arg
+        file_bytes = await message.download_media(bytes)
 
         if not file_bytes:
             raise MaxAPIError("Failed to download file")
+
+        logger.info(f"Downloaded file: {len(file_bytes)} bytes")
 
         # Upload to Max
         token = await self.max_client.upload_file(file_bytes)

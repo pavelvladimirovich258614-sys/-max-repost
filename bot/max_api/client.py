@@ -187,7 +187,7 @@ class MaxClient:
         """
         if self._session is None or self._session.closed:
             headers = {
-                "Authorization": self.access_token,
+                "Authorization": f"Bearer {self.access_token}",
                 "Accept": "application/json",
                 "User-Agent": "max-repost/1.0",
             }
@@ -405,7 +405,7 @@ class MaxClient:
 
         Raises:
             MaxAPIError: On API errors
-            AttachmentNotReadyError: If attachment not processed yet
+            AttachmentNotReadyError: If attachment not processed after retries
         """
         if len(text) > 4000:
             logger.warning(f"Message text exceeds 4000 chars ({len(text)}), truncating")
@@ -422,15 +422,26 @@ class MaxClient:
         if format in ("html", "markdown"):
             payload["format"] = format
 
-        # Use query parameter for chat_id, not in body
-        endpoint = f"/messages?chat_id={chat_id}"
-        data = await self._request("POST", endpoint, json=payload)
+        # Retry logic for attachment.not.ready errors
+        max_retries = 3
+        retry_delay = 2.0
 
-        return SendMessageResponse(
-            message_id=data.get("message_id", ""),
-            chat_id=data.get("chat_id", chat_id),
-            timestamp=data.get("timestamp"),
-        )
+        for attempt in range(max_retries):
+            try:
+                # Use query parameter for chat_id - pass via params for proper URL encoding
+                data = await self._request("POST", "/messages", params={"chat_id": chat_id}, json=payload)
+
+                return SendMessageResponse(
+                    message_id=data.get("message_id", ""),
+                    chat_id=data.get("chat_id", chat_id),
+                    timestamp=data.get("timestamp"),
+                )
+            except AttachmentNotReadyError as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Attachment not ready, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    raise e
 
     async def _upload_initiate(self, media_type: MediaType) -> UploadResponse:
         """
@@ -445,7 +456,7 @@ class MaxClient:
         Raises:
             MaxAPIError: On API errors
         """
-        data = await self._request("POST", f"/uploads?type={media_type.value}")
+        data = await self._request("POST", "/uploads", params={"type": media_type.value})
 
         return UploadResponse(
             url=data.get("url", ""),
