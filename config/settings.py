@@ -27,7 +27,7 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = Field(
-        default="postgresql+asyncpg://maxrepost:maxrepost@localhost:5432/maxrepost",
+        default="sqlite+aiosqlite:///./data/bot.db",
         alias="DATABASE_URL",
     )
 
