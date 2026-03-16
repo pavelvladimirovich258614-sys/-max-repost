@@ -93,7 +93,7 @@ class UserProfile:
 class ChatInfo:
     """Chat/channel information from /chats endpoint."""
 
-    id: str
+    id: str | int  # Can be int64 from API
     name: str
     type: str  # "channel", "chat", "dm"
     username: str | None = None
@@ -379,7 +379,7 @@ class MaxClient:
         chats = data.get("chats", data.get("items", []))
         return [
             ChatInfo(
-                id=chat.get("id", ""),
+                id=chat.get("id"),  # Keep original type (int or str) from API
                 name=chat.get("name", ""),
                 type=chat.get("type", "chat"),
                 username=chat.get("username"),
@@ -389,7 +389,7 @@ class MaxClient:
 
     async def send_message(
         self,
-        chat_id: str,
+        chat_id: str | int,
         text: str,
         attachments: list[dict] | None = None,
         format: str = "html",

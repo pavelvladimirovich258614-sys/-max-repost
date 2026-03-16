@@ -463,27 +463,65 @@ async def process_transfer_max_channel(message: Message, state) -> None:
     """
     text = message.text.strip()
 
-    # Parse Max channel ID
+    # Parse Max channel link to get potential name/identifier
     if "max.me/" in text or "max.ru/" in text:
         parts = text.split("/")[-1].strip()
-        max_channel_id = parts
+        max_channel_identifier = parts
     elif text.startswith("@"):
-        max_channel_id = text[1:]
+        max_channel_identifier = text[1:]
     else:
-        max_channel_id = text.strip()
+        max_channel_identifier = text.strip()
 
-    if not max_channel_id:
+    if not max_channel_identifier:
         await message.answer(
             "❌ Не удалось распознать ссылку на канал MAX.\n\n"
             "Отправьте ссылку или ID канала.",
         )
         return
 
-    # Verify Max API access
+    # Get chats list and find channel by numeric chat_id
+    max_channel_id = None
     try:
         async with MaxClient() as client:
             chats = await client.get_chats()
-            logger.info(f"Max API verified, accessible chats: {len(chats)}")
+            logger.info(f"Available Max chats: {chats}")
+
+            # Check if bot has access to any chats
+            if not chats:
+                await message.answer(
+                    "❌ <b>Бот не найден в каналах Max</b>\n\n"
+                    "Сначала добавьте бота в канал Max как администратора, "
+                    "затем повторите попытку.\n\n"
+                    "<b>Инструкция:</b>\n"
+                    f"1. Откройте <b>Настройки канала ➡ Подписчики</b>\n"
+                    f"2. Добавьте подписчика «Репост» ({MAX_BOT_USERNAME})\n"
+                    f"3. Перейдите в <b>Настройки канала ➡ Администраторы</b>\n"
+                    f"4. Добавьте администратора «Репост» ({MAX_BOT_USERNAME})\n"
+                    f"5. Включите <b>«Писать посты»</b> и сохраните",
+                    parse_mode="HTML",
+                    reply_markup=back_keyboard(),
+                )
+                return
+
+            # Find channel by name/username matching the identifier from link
+            for chat in chats:
+                # Check if identifier matches chat name or username
+                chat_name_lower = (chat.name or "").lower()
+                chat_username_lower = (chat.username or "").lower()
+                identifier_lower = max_channel_identifier.lower()
+
+                if (identifier_lower in chat_name_lower or
+                    chat_name_lower in identifier_lower or
+                    identifier_lower == chat_username_lower):
+                    max_channel_id = chat.id
+                    logger.info(f"Found matching channel: {chat.name} (id={chat.id})")
+                    break
+
+            # If no match found, use the first available channel (fallback)
+            if not max_channel_id and chats:
+                first_chat = chats[0]
+                max_channel_id = first_chat.id
+                logger.info(f"No exact match found, using first available channel: {first_chat.name} (id={first_chat.id})")
 
     except MaxAPIError as e:
         logger.error(f"Max API error: {e}")
@@ -505,7 +543,17 @@ async def process_transfer_max_channel(message: Message, state) -> None:
         )
         return
 
-    # Store Max channel ID
+    if not max_channel_id:
+        await message.answer(
+            "❌ <b>Не удалось определить канал</b>\n\n"
+            "Сначала добавьте бота в канал Max как администратора, "
+            "затем повторите попытку.",
+            parse_mode="HTML",
+            reply_markup=back_keyboard(),
+        )
+        return
+
+    # Store numeric Max channel ID
     await state.update_data(transfer_max_channel_id=max_channel_id)
 
     # Get channel info
