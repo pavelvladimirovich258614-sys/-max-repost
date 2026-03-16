@@ -433,10 +433,14 @@ class MaxClient:
         # Log request details for debugging
         logger.info(f"send_message request: chat_id={chat_id}, text={text[:100]!r}, params={{'chat_id': chat_id}}, payload={payload}")
 
+        # Ensure chat_id is int for Max API
+        chat_id_int = int(chat_id) if isinstance(chat_id, str) else chat_id
+
         for attempt in range(max_retries):
             try:
                 # Use query parameter for chat_id - pass via params for proper URL encoding
-                data = await self._request("POST", "/messages", params={"chat_id": chat_id}, json=payload)
+                # Max API expects int64 chat_id for channels
+                data = await self._request("POST", "/messages", params={"chat_id": chat_id_int}, json=payload)
 
                 return SendMessageResponse(
                     message_id=data.get("message_id", ""),

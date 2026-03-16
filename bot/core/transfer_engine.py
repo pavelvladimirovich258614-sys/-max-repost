@@ -244,7 +244,7 @@ class TransferEngine:
     async def transfer_posts(
         self,
         tg_channel: str,
-        max_channel_id: str,
+        max_channel_id: str | int | int,
         count: int | str,
         progress_callback: Optional[ProgressCallback] = None,
     ) -> TransferResult:
@@ -403,7 +403,7 @@ class TransferEngine:
     async def _transfer_single_post(
         self,
         message: Message,
-        max_channel_id: str,
+        max_channel_id: str | int | int,
     ) -> None:
         """
         Transfer a single post (not part of an album).
@@ -450,7 +450,7 @@ class TransferEngine:
     async def _transfer_photo(
         self,
         message: Message,
-        max_channel_id: str,
+        max_channel_id: str | int | int,
         text: str,
     ) -> None:
         """Transfer a photo post."""
@@ -480,7 +480,7 @@ class TransferEngine:
     async def _transfer_video(
         self,
         message: Message,
-        max_channel_id: str,
+        max_channel_id: str | int | int,
         text: str,
     ) -> None:
         """Transfer a video post."""
@@ -510,7 +510,7 @@ class TransferEngine:
     async def _transfer_audio(
         self,
         message: Message,
-        max_channel_id: str,
+        max_channel_id: str | int | int,
         text: str,
     ) -> None:
         """Transfer an audio post."""
@@ -540,7 +540,7 @@ class TransferEngine:
     async def _transfer_file(
         self,
         message: Message,
-        max_channel_id: str,
+        max_channel_id: str | int | int,
         text: str,
     ) -> None:
         """Transfer a file/document post."""
@@ -572,7 +572,7 @@ class TransferEngine:
         client,
         first_message: Message,
         tg_channel: str,
-        max_channel_id: str,
+        max_channel_id: str | int | int,
         processed_group_ids: set,
     ) -> None:
         """

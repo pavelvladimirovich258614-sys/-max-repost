@@ -272,6 +272,10 @@ async def _execute_transfer(
     data = await state.get_data()
     tg_channel = data.get("transfer_tg_channel_username", "")
     max_channel_id = data.get("transfer_max_channel_id", "")
+    
+    # Ensure max_channel_id is int (Max API requires numeric chat_id)
+    if isinstance(max_channel_id, str) and max_channel_id.lstrip('-').isdigit():
+        max_channel_id = int(max_channel_id)
     channel_title = data.get("transfer_tg_channel_title", "Канал")
 
     if not tg_channel or not max_channel_id:
@@ -452,6 +456,126 @@ async def _execute_transfer(
 # =============================================================================
 
 
+def _build_manual_chat_id_keyboard() -> InlineKeyboardMarkup:
+    """Build keyboard for manual chat_id entry."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📝 Ввести chat_id вручную", callback_data="transfer_enter_chat_id")
+    builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+@transfer_router.callback_query(lambda c: c.data == "transfer_enter_chat_id", StateFilter(TransferStates.transfer_waiting_max_channel))
+async def prompt_manual_chat_id(callback: CallbackQuery, state) -> None:
+    """
+    Prompt user to enter chat_id manually when /chats is empty.
+    
+    Args:
+        callback: Callback query
+        state: FSM state
+    """
+    await callback.message.edit_text(
+        "<b>📝 Ввод chat_id вручную</b>\n\n"
+        "Max API не возвращает каналы в списке чатов.\n"
+        "Введите числовой ID канала (отрицательное число).\n\n"
+        "<b>Как получить chat_id:</b>\n"
+        "1. Запустите: <code>python scripts/listen_updates.py</code>\n"
+        "2. Удалите и добавьте бота в канал Max\n"
+        "3. Скопируйте числовой ID из события\n\n"
+        "<b>Пример:</b> <code>-70977371223467</code>",
+        parse_mode="HTML",
+        reply_markup=back_keyboard(),
+    )
+    await callback.answer()
+    await state.set_state(TransferStates.transfer_enter_max_chat_id)
+
+
+@transfer_router.message(StateFilter(TransferStates.transfer_enter_max_chat_id))
+async def process_manual_chat_id(message: Message, state) -> None:
+    """
+    Process manually entered Max chat_id.
+    
+    Args:
+        message: User message with chat_id
+        state: FSM state
+    """
+    text = message.text.strip()
+    
+    # Validate: should be a negative integer (Max channel IDs are negative)
+    try:
+        chat_id = int(text)
+        if chat_id >= 0:
+            await message.answer(
+                "❌ <b>Некорректный chat_id</b>\n\n"
+                "ID канала в Max должен быть <b>отрицательным числом</b>.\n"
+                "Пример: <code>-70977371223467</code>\n\n"
+                "Попробуйте снова:",
+                parse_mode="HTML",
+                reply_markup=back_keyboard(),
+            )
+            return
+    except ValueError:
+        await message.answer(
+            "❌ <b>Некорректный формат</b>\n\n"
+            "Введите числовой ID (только цифры со знаком минус).\n"
+            "Пример: <code>-70977371223467</code>\n\n"
+            "Попробуйте снова:",
+            parse_mode="HTML",
+            reply_markup=back_keyboard(),
+        )
+        return
+    
+    # Store the chat_id
+    await state.update_data(transfer_max_channel_id=chat_id)
+    logger.info(f"Manually entered chat_id: {chat_id}")
+    
+    # Proceed to count posts
+    await _continue_after_max_channel_set(message, state)
+
+
+async def _continue_after_max_channel_set(message: Message, state) -> None:
+    """Continue flow after max_channel_id is set (either from API or manual entry)."""
+    # Get channel info
+    data = await state.get_data()
+    channel_title = data.get("transfer_tg_channel_title", "Канал")
+    channel_username = data.get("transfer_tg_channel_username", "")
+    max_channel_id = data.get("transfer_max_channel_id")
+
+    # Count posts using Telethon
+    try:
+        telethon = get_telethon_client(
+            api_id=settings.telegram_api_id,
+            api_hash=settings.telegram_api_hash,
+            phone=settings.telegram_phone,
+        )
+        post_count = await telethon.count_channel_posts(channel_username)
+    except Exception as e:
+        logger.error(f"Error counting posts: {e}")
+        await message.answer(
+            "❌ Не удалось подсчитать посты в канале.\n\n"
+            f"Ошибка: {str(e)}\n\n"
+            "Убедитесь, что канал публичный и бот имеет к нему доступ.",
+            reply_markup=back_keyboard(),
+        )
+        await state.clear()
+        return
+
+    total_price = post_count * PRICE_PER_POST
+
+    await message.answer(
+        f"<b>🚀 Мастер переноса</b>\n"
+        f"Канал: {channel_title}\n"
+        f"Постов: ~{post_count}\n\n"
+        f"💰 Тариф: {PRICE_PER_POST} руб./пост\n"
+        f"Итого за все: {total_price} руб.\n\n"
+        f"🔢 Сколько постов перенести?",
+        parse_mode="HTML",
+        reply_markup=select_count_keyboard(post_count),
+    )
+
+    await state.set_state(TransferStates.transfer_select_count)
+
+
 @transfer_router.message(StateFilter(TransferStates.transfer_waiting_max_channel))
 async def process_transfer_max_channel(message: Message, state) -> None:
     """
@@ -488,18 +612,17 @@ async def process_transfer_max_channel(message: Message, state) -> None:
 
             # Check if bot has access to any chats
             if not chats:
+                # Max API doesn't return channels in /chats - offer manual entry
                 await message.answer(
-                    "❌ <b>Бот не найден в каналах Max</b>\n\n"
-                    "Сначала добавьте бота в канал Max как администратора, "
-                    "затем повторите попытку.\n\n"
-                    "<b>Инструкция:</b>\n"
-                    f"1. Откройте <b>Настройки канала ➡ Подписчики</b>\n"
-                    f"2. Добавьте подписчика «Репост» ({MAX_BOT_USERNAME})\n"
-                    f"3. Перейдите в <b>Настройки канала ➡ Администраторы</b>\n"
-                    f"4. Добавьте администратора «Репост» ({MAX_BOT_USERNAME})\n"
-                    f"5. Включите <b>«Писать посты»</b> и сохраните",
+                    "⚠️ <b>Бот не найден в списке чатов</b>\n\n"
+                    "Max API не возвращает каналы в методе /chats. "
+                    "Это известная особенность API.\n\n"
+                    "<b>Варианты:</b>\n"
+                    "1️⃣ Ввести chat_id канала вручную (если вы его знаете)\n"
+                    "2️⃣ Использовать scripts/listen_updates.py для получения ID\n\n"
+                    "Если бот добавлен в канал, вы можете ввести числовой ID.",
                     parse_mode="HTML",
-                    reply_markup=back_keyboard(),
+                    reply_markup=_build_manual_chat_id_keyboard(),
                 )
                 return
 
@@ -546,15 +669,17 @@ async def process_transfer_max_channel(message: Message, state) -> None:
     if not max_channel_id:
         await message.answer(
             "❌ <b>Не удалось определить канал</b>\n\n"
-            "Сначала добавьте бота в канал Max как администратора, "
-            "затем повторите попытку.",
+            "Попробуйте ввести chat_id вручную:",
             parse_mode="HTML",
-            reply_markup=back_keyboard(),
+            reply_markup=_build_manual_chat_id_keyboard(),
         )
         return
 
     # Store numeric Max channel ID
     await state.update_data(transfer_max_channel_id=max_channel_id)
+    
+    # Continue to post counting
+    await _continue_after_max_channel_set(message, state)
 
     # Get channel info
     data = await state.get_data()
