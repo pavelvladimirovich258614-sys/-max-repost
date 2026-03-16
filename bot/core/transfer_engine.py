@@ -19,6 +19,14 @@ from typing import Any, Callable, Optional
 from loguru import logger
 from telethon.tl.types import (
     Message,
+    MessageEntityBold,
+    MessageEntityItalic,
+    MessageEntityCode,
+    MessageEntityPre,
+    MessageEntityTextUrl,
+    MessageEntityUrl,
+    MessageEntityStrike,
+    MessageEntityUnderline,
     MessageMediaPhoto,
     MessageMediaDocument,
     MessageMediaWebPage,
@@ -38,6 +46,67 @@ from telethon.tl.types import (
 )
 
 from bot.max_api.client import MaxClient, MaxAPIError, RateLimitError
+
+
+# =============================================================================
+# Markdown Conversion
+# =============================================================================
+
+def convert_telegram_to_max_markdown(text: str, entities: list) -> str:
+    """
+    Convert Telegram entities to Max markdown format.
+    
+    Telegram uses entities (MessageEntityBold, MessageEntityItalic, etc.)
+    Max uses markdown syntax (*italic*, **bold**, etc.)
+    
+    Args:
+        text: Original message text
+        entities: List of Telegram message entities
+        
+    Returns:
+        Text with Max markdown formatting
+    """
+    if not entities:
+        return text
+    
+    # Sort entities by offset (reverse order for insertion)
+    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
+    
+    result = text
+    for entity in sorted_entities:
+        offset = entity.offset
+        length = entity.length
+        end = offset + length
+        
+        # Get the text to wrap
+        entity_text = result[offset:end]
+        
+        # Apply markdown based on entity type
+        if isinstance(entity, MessageEntityBold):
+            replacement = f"**{entity_text}**"
+        elif isinstance(entity, MessageEntityItalic):
+            replacement = f"*{entity_text}*"
+        elif isinstance(entity, MessageEntityCode):
+            replacement = f"`{entity_text}`"
+        elif isinstance(entity, MessageEntityPre):
+            replacement = f"```{entity_text}```"
+        elif isinstance(entity, MessageEntityTextUrl):
+            replacement = f"[{entity_text}]({entity.url})"
+        elif isinstance(entity, MessageEntityUrl):
+            # URLs are left as-is, Telegram already includes them in text
+            continue
+        elif isinstance(entity, MessageEntityStrike):
+            replacement = f"~~{entity_text}~~"
+        elif isinstance(entity, MessageEntityUnderline):
+            replacement = f"++{entity_text}++"
+        else:
+            # Unknown entity type - skip
+            continue
+        
+        # Replace the text with markdown-wrapped version
+        result = result[:offset] + replacement + result[end:]
+    
+    return result
 
 
 # =============================================================================
@@ -295,7 +364,7 @@ class TransferEngine:
                 should_skip, skip_reason = should_skip_message(message)
                 if should_skip:
                     result.skipped += 1
-                    logger.debug(f"Skipping post {message.id}: {skip_reason}")
+                    logger.info(f"Skipping post {message.id}: reason={skip_reason}, text_preview='{(message.text or '')[:50]}...'")
                     await self._notify_progress(
                         progress_callback, result, message.id, skip_reason
                     )
@@ -306,6 +375,7 @@ class TransferEngine:
                 if message.grouped_id and message.grouped_id in processed_group_ids:
                     # Already processed as part of an album
                     result.skipped += 1
+                    logger.info(f"Skipping post {message.id}: reason=already_processed_in_album")
                     continue
 
                 # Transfer the post
@@ -416,7 +486,13 @@ class TransferEngine:
             MaxAPIError: If posting fails
         """
         media_type = detect_media_type(message)
-        text = message.text or ""
+        raw_text = message.text or ""
+        
+        # Convert Telegram entities to Max markdown
+        if message.entities:
+            text = convert_telegram_to_max_markdown(raw_text, message.entities)
+        else:
+            text = raw_text
 
         # Handle posts based on media type
         match media_type:
@@ -425,6 +501,7 @@ class TransferEngine:
                 await self.max_client.send_message(
                     chat_id=max_channel_id,
                     text=text,
+                    format="markdown",
                 )
             case MediaType.PHOTO:
                 await self._transfer_photo(message, max_channel_id, text)
@@ -439,12 +516,14 @@ class TransferEngine:
                 await self.max_client.send_message(
                     chat_id=max_channel_id,
                     text=text,
+                    format="markdown",
                 )
             case _:
                 # Fallback - send as text only
                 await self.max_client.send_message(
                     chat_id=max_channel_id,
                     text=text,
+                    format="markdown",
                 )
 
     async def _transfer_photo(
@@ -475,6 +554,7 @@ class TransferEngine:
             chat_id=max_channel_id,
             text=text,
             attachments=[attachment] if token else None,
+            format="markdown",
         )
 
     async def _transfer_video(
@@ -505,6 +585,7 @@ class TransferEngine:
             chat_id=max_channel_id,
             text=text,
             attachments=[attachment] if token else None,
+            format="markdown",
         )
 
     async def _transfer_audio(
@@ -535,6 +616,7 @@ class TransferEngine:
             chat_id=max_channel_id,
             text=text,
             attachments=[attachment] if token else None,
+            format="markdown",
         )
 
     async def _transfer_file(
@@ -565,6 +647,7 @@ class TransferEngine:
             chat_id=max_channel_id,
             text=text,
             attachments=[attachment] if token else None,
+            format="markdown",
         )
 
     async def _transfer_album(
