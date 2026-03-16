@@ -187,7 +187,7 @@ class MaxClient:
         """
         if self._session is None or self._session.closed:
             headers = {
-                "Authorization": f"Bearer {self.access_token}",
+                "Authorization": self.access_token,
                 "Accept": "application/json",
                 "User-Agent": "max-repost/1.0",
             }
