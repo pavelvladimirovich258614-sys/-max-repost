@@ -1,9 +1,9 @@
-"""Telegram Bot initialization using aiogram with Redis FSM storage."""
+"""Telegram Bot initialization using aiogram with Memory FSM storage."""
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.fsm.storage.redis import RedisStorage
+from aiogram.fsm.storage.memory import MemoryStorage
 
 from config.settings import settings
 from bot.telegram.middlewares.db import DBMiddleware
@@ -38,8 +38,8 @@ def setup_dispatcher(bot: Bot) -> Dispatcher:
     Returns:
         Configured Dispatcher
     """
-    # Create Redis storage for FSM
-    storage = RedisStorage.from_url(settings.redis_url)
+    # Create memory storage for FSM
+    storage = MemoryStorage()
 
     # Create dispatcher with storage
     dp = Dispatcher(storage=storage)
@@ -64,7 +64,6 @@ def setup_dispatcher(bot: Bot) -> Dispatcher:
     async def on_shutdown() -> None:
         """Cleanup resources on shutdown."""
         await bot.session.close()
-        await storage.close()
         print("Bot shut down gracefully")
 
     return dp
