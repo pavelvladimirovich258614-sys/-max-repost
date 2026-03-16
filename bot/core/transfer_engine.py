@@ -49,63 +49,79 @@ from bot.max_api.client import MaxClient, MaxAPIError, RateLimitError
 
 
 # =============================================================================
-# Markdown Conversion
+# Markup Conversion (Max API format)
 # =============================================================================
 
-def convert_telegram_to_max_markdown(text: str, entities: list) -> str:
+def entities_to_max_markup(entities: list) -> list[dict]:
     """
-    Convert Telegram entities to Max markdown format.
+    Convert Telegram entities to Max API markup format.
     
-    Telegram uses entities (MessageEntityBold, MessageEntityItalic, etc.)
-    Max uses markdown syntax (*italic*, **bold**, etc.)
+    Max API uses markup array with offset/length instead of markdown symbols.
+    This avoids text corruption from overlapping entities.
     
     Args:
-        text: Original message text
-        entities: List of Telegram message entities
+        entities: List of Telegram message entities from Telethon
         
     Returns:
-        Text with Max markdown formatting
+        List of Max markup objects: [{"type": "strong", "from": 0, "length": 5}, ...]
     """
     if not entities:
-        return text
+        return []
     
-    # Sort entities by offset (reverse order for insertion)
-    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
-    
-    result = text
-    for entity in sorted_entities:
-        offset = entity.offset
-        length = entity.length
-        end = offset + length
+    markup = []
+    for entity in entities:
+        item = {"from": entity.offset, "length": entity.length}
         
-        # Get the text to wrap
-        entity_text = result[offset:end]
-        
-        # Apply markdown based on entity type
         if isinstance(entity, MessageEntityBold):
-            replacement = f"**{entity_text}**"
+            item["type"] = "strong"
         elif isinstance(entity, MessageEntityItalic):
-            replacement = f"*{entity_text}*"
+            item["type"] = "emphasized"
         elif isinstance(entity, MessageEntityCode):
-            replacement = f"`{entity_text}`"
+            item["type"] = "monospaced"
         elif isinstance(entity, MessageEntityPre):
-            replacement = f"```{entity_text}```"
+            item["type"] = "monospaced"
         elif isinstance(entity, MessageEntityTextUrl):
-            replacement = f"[{entity_text}]({entity.url})"
+            item["type"] = "link"
+            item["url"] = entity.url
         elif isinstance(entity, MessageEntityUrl):
-            # URLs are left as-is, Telegram already includes them in text
-            continue
+            item["type"] = "link"
+            # URL is the text itself, extracted at send time
+            item["url"] = None  # Will be filled from text
         elif isinstance(entity, MessageEntityStrike):
-            replacement = f"~~{entity_text}~~"
+            item["type"] = "strikethrough"
         elif isinstance(entity, MessageEntityUnderline):
-            replacement = f"++{entity_text}++"
+            # Max doesn't have underline, use emphasized as fallback
+            item["type"] = "emphasized"
         else:
             # Unknown entity type - skip
             continue
         
-        # Replace the text with markdown-wrapped version
-        result = result[:offset] + replacement + result[end:]
+        markup.append(item)
     
+    # Fill in URLs for MessageEntityUrl type
+    # This needs to be done after we have the text
+    return markup
+
+
+def finalize_markup(text: str, markup: list[dict]) -> list[dict]:
+    """
+    Finalize markup by filling in URL values for MessageEntityUrl types.
+    
+    Args:
+        text: The message text
+        markup: Partially built markup array
+        
+    Returns:
+        Final markup array with all URLs filled in
+    """
+    result = []
+    for item in markup:
+        if item.get("url") is None and item.get("type") == "link":
+            # This was a MessageEntityUrl, extract URL from text
+            start = item["from"]
+            length = item["length"]
+            item["url"] = text[start:start + length]
+        result.append(item)
     return result
 
 
@@ -486,13 +502,13 @@ class TransferEngine:
             MaxAPIError: If posting fails
         """
         media_type = detect_media_type(message)
-        raw_text = message.text or ""
+        text = message.text or ""
         
-        # Convert Telegram entities to Max markdown
+        # Convert Telegram entities to Max markup format
+        markup = None
         if message.entities:
-            text = convert_telegram_to_max_markdown(raw_text, message.entities)
-        else:
-            text = raw_text
+            raw_markup = entities_to_max_markup(message.entities)
+            markup = finalize_markup(text, raw_markup)
 
         # Handle posts based on media type
         match media_type:
@@ -501,29 +517,29 @@ class TransferEngine:
                 await self.max_client.send_message(
                     chat_id=max_channel_id,
                     text=text,
-                    format="markdown",
+                    markup=markup,
                 )
             case MediaType.PHOTO:
-                await self._transfer_photo(message, max_channel_id, text)
+                await self._transfer_photo(message, max_channel_id, text, markup)
             case MediaType.VIDEO:
-                await self._transfer_video(message, max_channel_id, text)
+                await self._transfer_video(message, max_channel_id, text, markup)
             case MediaType.AUDIO:
-                await self._transfer_audio(message, max_channel_id, text)
+                await self._transfer_audio(message, max_channel_id, text, markup)
             case MediaType.FILE:
-                await self._transfer_file(message, max_channel_id, text)
+                await self._transfer_file(message, max_channel_id, text, markup)
             case MediaType.UNSUPPORTED:
                 # Unsupported - send as text only
                 await self.max_client.send_message(
                     chat_id=max_channel_id,
                     text=text,
-                    format="markdown",
+                    markup=markup,
                 )
             case _:
                 # Fallback - send as text only
                 await self.max_client.send_message(
                     chat_id=max_channel_id,
                     text=text,
-                    format="markdown",
+                    markup=markup,
                 )
 
     async def _transfer_photo(
@@ -531,6 +547,7 @@ class TransferEngine:
         message: Message,
         max_channel_id: str | int | int,
         text: str,
+        markup: list[dict] | None = None,
     ) -> None:
         """Transfer a photo post."""
         # Download photo to BytesIO - Telethon returns bytes when passed BytesIO
@@ -554,7 +571,7 @@ class TransferEngine:
             chat_id=max_channel_id,
             text=text,
             attachments=[attachment] if token else None,
-            format="markdown",
+            markup=markup,
         )
 
     async def _transfer_video(
@@ -562,6 +579,7 @@ class TransferEngine:
         message: Message,
         max_channel_id: str | int | int,
         text: str,
+        markup: list[dict] | None = None,
     ) -> None:
         """Transfer a video post."""
         # Download video to BytesIO
@@ -585,7 +603,7 @@ class TransferEngine:
             chat_id=max_channel_id,
             text=text,
             attachments=[attachment] if token else None,
-            format="markdown",
+            markup=markup,
         )
 
     async def _transfer_audio(
@@ -593,6 +611,7 @@ class TransferEngine:
         message: Message,
         max_channel_id: str | int | int,
         text: str,
+        markup: list[dict] | None = None,
     ) -> None:
         """Transfer an audio post."""
         # Download audio to BytesIO
@@ -616,7 +635,7 @@ class TransferEngine:
             chat_id=max_channel_id,
             text=text,
             attachments=[attachment] if token else None,
-            format="markdown",
+            markup=markup,
         )
 
     async def _transfer_file(
@@ -624,6 +643,7 @@ class TransferEngine:
         message: Message,
         max_channel_id: str | int | int,
         text: str,
+        markup: list[dict] | None = None,
     ) -> None:
         """Transfer a file/document post."""
         # Download file to BytesIO
@@ -647,7 +667,7 @@ class TransferEngine:
             chat_id=max_channel_id,
             text=text,
             attachments=[attachment] if token else None,
-            format="markdown",
+            markup=markup,
         )
 
     async def _transfer_album(
