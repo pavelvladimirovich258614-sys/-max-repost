@@ -387,6 +387,81 @@ class MaxClient:
             for chat in chats
         ]
 
+    async def find_channel_chat_id(self, timeout: int = 30) -> int | None:
+        """
+        Listen for updates and find channel chat_id.
+
+        Uses long polling to wait for updates that contain channel information.
+        Searches for events: bot_added, user_added, message_created in channels.
+
+        Args:
+            timeout: Long polling timeout in seconds (default 30)
+
+        Returns:
+            Channel chat_id if found, None otherwise
+        """
+        params = {
+            "timeout": timeout,
+            "limit": 100,
+            "types": "bot_added,message_created,user_added"
+        }
+
+        logger.info(f"Polling /updates with timeout={timeout}s for channel chat_id")
+
+        try:
+            response = await self._request("GET", "/updates", params=params)
+            updates = response.get("updates", [])
+            logger.info(f"Received {len(updates)} updates")
+
+            for update in updates:
+                logger.debug(f"Processing update: {update}")
+
+                # Try to extract chat_id from various update structures
+                # Case 1: bot_added or user_added - chat_id at top level
+                chat_id = update.get("chat_id")
+                if chat_id:
+                    # Check if this is a channel
+                    chat = update.get("chat", {})
+                    if chat.get("type") == "channel" or update.get("is_channel"):
+                        logger.info(f"Found channel chat_id from chat event: {chat_id}")
+                        return int(chat_id)
+
+                # Case 2: message_created - chat info in message.recipient
+                message = update.get("message", {})
+                if message:
+                    recipient = message.get("recipient", {})
+                    if recipient.get("chat_type") == "channel":
+                        channel_id = recipient.get("chat_id")
+                        if channel_id:
+                            logger.info(f"Found channel chat_id from message: {channel_id}")
+                            return int(channel_id)
+
+                    # Alternative: message.chat structure
+                    chat = message.get("chat", {})
+                    if chat.get("type") == "channel":
+                        channel_id = chat.get("id")
+                        if channel_id:
+                            logger.info(f"Found channel chat_id from message.chat: {channel_id}")
+                            return int(channel_id)
+
+                # Case 3: Direct chat object in update
+                chat = update.get("chat", {})
+                if chat.get("type") == "channel":
+                    channel_id = chat.get("id")
+                    if channel_id:
+                        logger.info(f"Found channel chat_id from update.chat: {channel_id}")
+                        return int(channel_id)
+
+        except MaxAPIError as e:
+            logger.error(f"Max API error while finding channel: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error finding channel: {e}")
+            return None
+
+        logger.info("No channel chat_id found in updates")
+        return None
+
     async def send_message(
         self,
         chat_id: str | int,

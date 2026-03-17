@@ -14,6 +14,9 @@ from bot.telegram.states import TransferStates
 from bot.telegram.keyboards.transfer import (
     back_keyboard,
     back_to_start_keyboard,
+    detect_channel_keyboard,
+    confirm_channel_keyboard,
+    retry_detect_keyboard,
     select_count_keyboard,
     transfer_complete_keyboard,
 )
@@ -250,6 +253,132 @@ async def _show_max_connection_instructions(message: Message, state, channel_tit
 
 
 # =============================================================================
+# Channel Auto-Detection Handlers
+# =============================================================================
+
+
+@transfer_router.callback_query(lambda c: c.data == "transfer_detect_auto", StateFilter(TransferStates.transfer_detect_max_channel))
+async def detect_channel_auto(callback: CallbackQuery, state) -> None:
+    """
+    Auto-detect channel chat_id by listening to Max API updates.
+
+    Args:
+        callback: Callback query
+        state: FSM state
+    """
+    import asyncio
+
+    await callback.message.edit_text(
+        "⏳ <b>Слушаю обновления Max API...</b> (до 30 сек)\n\n"
+        "Если бот уже в канале — напишите любое сообщение в канал Max.",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+    try:
+        # Use asyncio.wait_for to prevent blocking the bot for too long
+        async with MaxClient() as client:
+            chat_id = await asyncio.wait_for(
+                client.find_channel_chat_id(timeout=30),
+                timeout=35  # Slightly longer than API timeout
+            )
+
+        if chat_id:
+            # Found channel - ask for confirmation
+            await callback.message.edit_text(
+                f"✅ <b>Найден канал!</b>\n\n"
+                f"chat_id = <code>{chat_id}</code>\n\n"
+                f"Использовать этот канал?",
+                parse_mode="HTML",
+                reply_markup=confirm_channel_keyboard(chat_id),
+            )
+        else:
+            # No channel found
+            await callback.message.edit_text(
+                "❌ <b>Не удалось определить ID</b>\n\n"
+                "Попробуйте:\n"
+                "1. Удалите бота из канала и добавьте заново\n"
+                "2. Напишите сообщение в канал\n"
+                "3. Нажмите <b>'Определить ID'</b> ещё раз",
+                parse_mode="HTML",
+                reply_markup=retry_detect_keyboard(),
+            )
+
+    except asyncio.TimeoutError:
+        logger.warning("Channel detection timed out")
+        await callback.message.edit_text(
+            "❌ <b>Не удалось определить ID</b>\n\n"
+            "Таймаут ожидания (30 сек).\n\n"
+            "Попробуйте:\n"
+            "1. Удалите бота из канала и добавьте заново\n"
+            "2. Напишите сообщение в канал\n"
+            "3. Нажмите <b>'Определить ID'</b> ещё раз",
+            parse_mode="HTML",
+            reply_markup=retry_detect_keyboard(),
+        )
+
+    except MaxAPIError as e:
+        logger.error(f"Max API error during channel detection: {e}")
+        await callback.message.edit_text(
+            f"❌ <b>Ошибка Max API</b>\n\n"
+            f"{str(e)}\n\n"
+            f"Попробуйте ввести chat_id вручную:",
+            parse_mode="HTML",
+            reply_markup=retry_detect_keyboard(),
+        )
+
+    except Exception as e:
+        logger.error(f"Unexpected error during channel detection: {e}")
+        await callback.message.edit_text(
+            "❌ <b>Ошибка при определении канала</b>\n\n"
+            "Попробуйте ввести chat_id вручную:",
+            parse_mode="HTML",
+            reply_markup=retry_detect_keyboard(),
+        )
+
+
+@transfer_router.callback_query(lambda c: c.data.startswith("transfer_confirm_channel:"), StateFilter(TransferStates.transfer_detect_max_channel))
+async def confirm_detected_channel(callback: CallbackQuery, state) -> None:
+    """
+    Confirm using the detected channel chat_id.
+
+    Args:
+        callback: Callback query
+        state: FSM state
+    """
+    # Extract chat_id from callback data
+    chat_id = int(callback.data.split(":")[1])
+
+    # Store the chat_id
+    await state.update_data(transfer_max_channel_id=chat_id)
+    logger.info(f"Auto-detected chat_id confirmed: {chat_id}")
+
+    await callback.answer("✅ Канал выбран")
+
+    # Continue to post counting
+    await _continue_after_max_channel_set(callback.message, state)
+
+
+@transfer_router.callback_query(lambda c: c.data == "transfer_reject_channel", StateFilter(TransferStates.transfer_detect_max_channel))
+async def reject_detected_channel(callback: CallbackQuery, state) -> None:
+    """
+    Reject the detected channel and try again or enter manually.
+
+    Args:
+        callback: Callback query
+        state: FSM state
+    """
+    await callback.message.edit_text(
+        "🔍 <b>Определяю ID канала...</b>\n\n"
+        "Убедитесь что бот добавлен в канал Max как администратор "
+        "с правом <b>'Писать посты'</b>.",
+        parse_mode="HTML",
+        reply_markup=detect_channel_keyboard(),
+    )
+    await callback.answer()
+
+
+# =============================================================================
 # Transfer Execution
 # =============================================================================
 
@@ -465,7 +594,7 @@ def _build_manual_chat_id_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-@transfer_router.callback_query(lambda c: c.data == "transfer_enter_chat_id", StateFilter(TransferStates.transfer_waiting_max_channel))
+@transfer_router.callback_query(lambda c: c.data == "transfer_enter_chat_id", StateFilter(TransferStates.transfer_waiting_max_channel, TransferStates.transfer_detect_max_channel))
 async def prompt_manual_chat_id(callback: CallbackQuery, state) -> None:
     """
     Prompt user to enter chat_id manually when /chats is empty.
@@ -612,18 +741,15 @@ async def process_transfer_max_channel(message: Message, state) -> None:
 
             # Check if bot has access to any chats
             if not chats:
-                # Max API doesn't return channels in /chats - offer manual entry
+                # Max API doesn't return channels in /chats - show auto-detect options
                 await message.answer(
-                    "⚠️ <b>Бот не найден в списке чатов</b>\n\n"
-                    "Max API не возвращает каналы в методе /chats. "
-                    "Это известная особенность API.\n\n"
-                    "<b>Варианты:</b>\n"
-                    "1️⃣ Ввести chat_id канала вручную (если вы его знаете)\n"
-                    "2️⃣ Использовать scripts/listen_updates.py для получения ID\n\n"
-                    "Если бот добавлен в канал, вы можете ввести числовой ID.",
+                    "🔍 <b>Определяю ID канала...</b>\n\n"
+                    "Убедитесь что бот добавлен в канал Max как администратор "
+                    "с правом <b>'Писать посты'</b>.",
                     parse_mode="HTML",
-                    reply_markup=_build_manual_chat_id_keyboard(),
+                    reply_markup=detect_channel_keyboard(),
                 )
+                await state.set_state(TransferStates.transfer_detect_max_channel)
                 return
 
             # Find channel by name/username matching the identifier from link
