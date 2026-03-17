@@ -173,7 +173,7 @@ async def start_transfer_setup(callback: CallbackQuery, state) -> None:
     """
     Start post transfer setup flow.
 
-    Explains the 4 stages and asks for TG channel link.
+    Shows description and asks for TG channel link.
 
     Args:
         callback: Callback query
@@ -187,15 +187,16 @@ async def start_transfer_setup(callback: CallbackQuery, state) -> None:
     )
     
     await callback.message.edit_text(
-        "<b>🔗 Пришлите ссылку на ваш Telegram-канал</b>\n\n"
-        "Мы выполним перенос постов в 4 этапа:\n"
-        "1. <b>Анализ</b>: Посчитаем количество постов.\n"
-        "2. <b>Расчёт</b>: Определим стоимость переноса.\n"
-        "3. <b>Подключение</b>: Настроим связь с MAX.\n"
-        "4. <b>Запуск</b>: Начнём перенос контента.\n\n"
-        "👉 Отправьте ссылку на ваш публичный Telegram-канал:\n"
-        "<i>https://t.me/channelname</i>",
+        "<b>📥 Перенос контента из Telegram в Max</b>\n\n"
+        "Перенесу все ваши посты из Telegram-канала в канал Max с сохранением:\n"
+        "✅ Текста и форматирования\n"
+        "✅ Фото и видео\n"
+        "✅ Аудио и документов\n"
+        "✅ Ссылок\n\n"
+        "<b>Отправьте ссылку на ваш Telegram-канал:</b>\n"
+        "Например: <code>@channelname</code> или <code>https://t.me/channelname</code>",
         parse_mode="HTML",
+        reply_markup=back_keyboard(),
     )
     await callback.answer()
 
@@ -227,14 +228,15 @@ async def show_my_verified_channels(
         if channels:
             text = (
                 "<b>📢 Мои каналы</b>\n\n"
-                "Выберите ранее верифицированный канал для переноса:\n"
+                "Здесь хранятся ваши верифицированные Telegram-каналы. "
+                "Выберите канал для быстрого переноса (без повторной верификации):\n"
             )
             keyboard = verified_channels_keyboard(channels)
         else:
             text = (
                 "<b>📢 Мои каналы</b>\n\n"
                 "У вас пока нет верифицированных каналов.\n\n"
-                "Добавьте канал, чтобы начать перенос постов в Max."
+                "Нажмите «Настроить перенос» чтобы добавить первый канал."
             )
             builder = InlineKeyboardBuilder()
             builder.button(text="➕ Добавить канал", callback_data="start_setup_transfer")

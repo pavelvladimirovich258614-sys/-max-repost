@@ -1,8 +1,11 @@
 """Start router with /start, /menu, /help handlers and navigation callbacks."""
 
+import asyncio
+
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
+from loguru import logger
 
 from bot.telegram.keyboards.main import (
     start_keyboard,
@@ -18,21 +21,31 @@ TG_BOT_USERNAME = "maxx_repost_bot"
 MAX_BOT_NAME = "Репост"
 MAX_BOT_USERNAME = "id752703975446_1_bot"
 MAX_BOT_LINK = "https://max.ru/id752703975446_1_bot"
-SUPPORT_BOT = "@NeuroCash_Support_Bot"
+SUPPORT_BOT = "@MAXPosterSupport"
 
-# Welcome message
-WELCOME_MESSAGE = """
-<b>👋 Добро пожаловать!</b>
+# Welcome sticker
+WELCOME_STICKER = "CAACAgIAAxkBAAIhSmm5Iq9RaarKBrdOXPkDrOKyC-ROAALwFwACKWWpSS1UtcEXnRxkOgQ"
 
-Я бот <b>«Репост»</b> — помогу переносить посты из Telegram-каналов в мессенджер Max.
 
-<b>Что я умею:</b>
-• 🔄 Автоматически репостить новые посты
-• 📥 Переносить архив постов
-• 🎛 Управлять несколькими каналами
+async def _delete_after_delay(msg, seconds: int = 5) -> None:
+    """Delete message after specified delay."""
+    await asyncio.sleep(seconds)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
 
-Выберите действие:
-"""
+
+def get_welcome_message(first_name: str) -> str:
+    """Generate personalized welcome message."""
+    return f"""<b>👋 Привет, {first_name}!</b>
+
+Я — <b>MAX Постер</b> 🤖
+Переношу посты из Telegram в Max и настраиваю автопостинг.
+
+🎁 <b>Для новых пользователей — 5 постов бесплатно!</b>
+
+Выберите действие:"""
 
 # Help / Instruction message
 INSTRUCTION_MESSAGE = """
@@ -78,7 +91,7 @@ async def cmd_start(message: Message, user_repo) -> None:
     """
     Handle /start command.
 
-    Register user if new, send welcome message with start keyboard.
+    Register user if new, send welcome sticker and message with start keyboard.
     First-time users see the welcome with 3 main actions.
 
     Args:
@@ -87,16 +100,32 @@ async def cmd_start(message: Message, user_repo) -> None:
     """
     # Register user (get or create)
     user, _ = await user_repo.get_or_create(message.from_user.id)
+    
+    # Get user's first name
+    first_name = message.from_user.first_name or "друг"
+    
+    # Send welcome sticker and delete after 5 seconds
+    try:
+        sticker_msg = await message.answer_sticker(WELCOME_STICKER)
+        asyncio.create_task(_delete_after_delay(sticker_msg, 5))
+    except Exception as e:
+        logger.debug(f"Could not send welcome sticker: {e}")
 
     await message.answer(
-        WELCOME_MESSAGE,
+        get_welcome_message(first_name),
         parse_mode="HTML",
         reply_markup=start_keyboard(),
     )
 
 
 @start_router.message(Command("menu"))
-async def cmd_menu(message: Message, user_repo, channel_repo) -> None:
+async def cmd_menu(
+    message: Message,
+    user_repo,
+    channel_repo,
+    verified_channel_repo,
+    transferred_post_repo,
+) -> None:
     """
     Handle /menu command.
 
@@ -107,6 +136,8 @@ async def cmd_menu(message: Message, user_repo, channel_repo) -> None:
         message: Telegram message
         user_repo: User repository from middleware
         channel_repo: Channel repository for counting channels
+        verified_channel_repo: Repository for verified channels
+        transferred_post_repo: Repository for transferred posts
     """
     user = await user_repo.get_by_telegram_id(message.from_user.id)
 
@@ -114,17 +145,24 @@ async def cmd_menu(message: Message, user_repo, channel_repo) -> None:
         # Fallback to get_or_create if user not found
         user, _ = await user_repo.get_or_create(message.from_user.id)
 
-    # Count channels
+    # Get stats
+    verified_count = 0
+    total_transferred = 0
+    
     try:
-        channels = await channel_repo.get_by_user(user.id)
-        channel_count = len(channels)
-    except Exception:
-        channel_count = 0
+        # Count verified channels
+        verified_channels = await verified_channel_repo.get_user_verified_channels(message.from_user.id)
+        verified_count = len(verified_channels)
+    except Exception as e:
+        logger.debug(f"Could not get verified channels count: {e}")
+    
+    # Calculate free remaining
+    free_remaining = max(0, 5 - user.free_posts_used)
 
     menu_text = (
         f"<b>👤 Личный кабинет</b>\n\n"
-        f"📢 Каналов: {channel_count}\n"
-        f"💎 Баланс: {user.balance} постов"
+        f"📢 Каналов: {verified_count}\n"
+        f"🎁 Баланс: {free_remaining} бесплатных постов\n"
     )
 
     await message.answer(
@@ -179,10 +217,23 @@ async def callback_check_sub(callback: CallbackQuery) -> None:
 
 @start_router.callback_query(lambda c: c.data == "menu_balance")
 async def callback_balance(callback: CallbackQuery, user_repo) -> None:
-    """Handle 'Check balance' button - show balance."""
+    """Handle 'Check balance' button - show detailed balance info."""
     user = await user_repo.get_by_telegram_id(callback.from_user.id)
-
-    balance_text = f"<b>💎 Ваш баланс: {user.balance} постов</b>"
+    
+    # Get user's first name
+    first_name = callback.from_user.first_name or "друг"
+    
+    # Calculate free remaining
+    free_remaining = max(0, 5 - user.free_posts_used)
+    
+    # Build balance text
+    balance_text = (
+        f"<b>💎 Ваш баланс</b>\n\n"
+        f"👤 {first_name}\n\n"
+        f"🎁 Бесплатных постов: {free_remaining} из 5\n"
+        f"💰 Оплаченных постов: {user.balance}\n\n"
+        f"💳 Стоимость переноса: 3₽ за пост"
+    )
 
     await callback.message.edit_text(
         balance_text,
@@ -193,12 +244,18 @@ async def callback_balance(callback: CallbackQuery, user_repo) -> None:
 
 
 @start_router.callback_query(lambda c: c.data == "menu_bonus")
-async def callback_bonus(callback: CallbackQuery) -> None:
-    """Handle 'Bonus posts' button - placeholder."""
+async def callback_bonus(callback: CallbackQuery, user_repo) -> None:
+    """Handle 'Bonus posts' button - show free posts info."""
+    user = await user_repo.get_by_telegram_id(callback.from_user.id)
+    
+    # Calculate free remaining
+    free_remaining = max(0, 5 - user.free_posts_used)
+    
     await callback.message.edit_text(
-        "<b>🎁 Бонусные посты</b>\n\n"
-        "🚧 В разработке\n\n"
-        "Получите 10 бесплатных постов за подписку на канал!",
+        f"<b>🎁 Бонусные посты</b>\n\n"
+        f"Каждый новый пользователь получает 5 бесплатных постов для ознакомления с сервисом.\n\n"
+        f"<b>Ваш статус:</b> {free_remaining} из 5 бесплатных постов осталось\n\n"
+        f"💰 После использования бесплатных постов — перенос стоит 3₽ за пост.",
         parse_mode="HTML",
         reply_markup=back_to_menu_keyboard(),
     )
@@ -235,24 +292,34 @@ async def callback_help(callback: CallbackQuery) -> None:
 
 
 @start_router.callback_query(lambda c: c.data == "nav_goto_menu")
-async def callback_goto_menu(callback: CallbackQuery, user_repo, channel_repo) -> None:
+async def callback_goto_menu(
+    callback: CallbackQuery,
+    user_repo,
+    verified_channel_repo,
+) -> None:
     """Handle 'Back to menu' navigation."""
     user = await user_repo.get_by_telegram_id(callback.from_user.id)
 
     if user is None:
         user, _ = await user_repo.get_or_create(callback.from_user.id)
 
-    # Count channels
+    # Get stats
+    verified_count = 0
+    
     try:
-        channels = await channel_repo.get_by_user(user.id)
-        channel_count = len(channels)
-    except Exception:
-        channel_count = 0
+        # Count verified channels
+        verified_channels = await verified_channel_repo.get_user_verified_channels(callback.from_user.id)
+        verified_count = len(verified_channels)
+    except Exception as e:
+        logger.debug(f"Could not get verified channels count: {e}")
+    
+    # Calculate free remaining
+    free_remaining = max(0, 5 - user.free_posts_used)
 
     menu_text = (
         f"<b>👤 Личный кабинет</b>\n\n"
-        f"📢 Каналов: {channel_count}\n"
-        f"💎 Баланс: {user.balance} постов"
+        f"📢 Каналов: {verified_count}\n"
+        f"🎁 Баланс: {free_remaining} бесплатных постов\n"
     )
 
     await callback.message.edit_text(

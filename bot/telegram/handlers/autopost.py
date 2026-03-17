@@ -3,6 +3,7 @@
 from aiogram import Router
 from aiogram.filters import StateFilter
 from aiogram.types import Message, CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from loguru import logger
 
 from bot.telegram.states import AutopostStates
@@ -31,26 +32,83 @@ autopost_router = Router(name="autopost")
 
 @autopost_router.callback_query(lambda c: c.data == "start_setup_autopost")
 @autopost_router.callback_query(lambda c: c.data == "menu_new_autopost")
-async def start_autopost_setup(callback: CallbackQuery, state) -> None:
+async def start_autopost_setup(
+    callback: CallbackQuery,
+    state,
+    verified_channel_repo,
+) -> None:
     """
     Start auto-posting setup flow.
 
     Can be triggered from start screen or menu.
+    If user has verified channels, show them for quick selection.
 
     Args:
         callback: Callback query
         state: FSM state
+        verified_channel_repo: Repository for verified channels
     """
-    await callback.message.edit_text(
-        "<b>🔄 Настройка автопостинга</b>\n\n"
-        "Для автоматического переноса постов требуются права администратора в Telegram-канале.\n\n"
-        "👉 Укажите ссылку на ваш Telegram-канал:\n"
-        "<i>https://t.me/channelname</i>",
-        parse_mode="HTML",
-    )
-
-    # Set FSM state
-    await state.set_state(AutopostStates.waiting_tg_channel)
+    user_id = callback.from_user.id
+    
+    try:
+        # Get user's verified channels
+        channels = await verified_channel_repo.get_user_verified_channels(user_id)
+        
+        if channels:
+            # User has verified channels - show them with option to enable autopost
+            from aiogram.utils.keyboard import InlineKeyboardBuilder
+            
+            text = (
+                "<b>⚡ Настройка автопостинга</b>\n\n"
+                "Новые посты из вашего Telegram-канала будут автоматически появляться в Max "
+                "через несколько секунд.\n\n"
+                "<b>Для настройки нужно сначала выполнить перенос контента.</b> "
+                "Автопостинг включается после завершения переноса.\n\n"
+                "Если вы уже переносили канал — выберите его из списка ниже:"
+            )
+            
+            builder = InlineKeyboardBuilder()
+            for channel in channels:
+                display_name = channel.tg_channel[:30] if len(channel.tg_channel) <= 30 else channel.tg_channel[:27] + "..."
+                builder.button(
+                    text=f"📢 @{display_name}",
+                    callback_data=f"select_verified_channel:{channel.tg_channel}",
+                )
+            
+            builder.button(text="➕ Другой канал", callback_data="autopost_new_channel")
+            builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+            builder.adjust(1)
+            
+            await callback.message.edit_text(text, reply_markup=builder.as_markup())
+        else:
+            # No verified channels
+            text = (
+                "<b>⚡ Настройка автопостинга</b>\n\n"
+                "Новые посты из вашего Telegram-канала будут автоматически появляться в Max "
+                "через несколько секунд.\n\n"
+                "<b>Для настройки нужно сначала выполнить перенос контента.</b> "
+                "Автопостинг включается после завершения переноса."
+            )
+            
+            from bot.telegram.keyboards.autopost import back_to_menu_keyboard
+            await callback.message.edit_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=back_to_menu_keyboard(),
+            )
+    except Exception as e:
+        logger.error(f"Error in start_autopost_setup: {e}")
+        # Fallback to simple message
+        await callback.message.edit_text(
+            "<b>⚡ Настройка автопостинга</b>\n\n"
+            "Новые посты из вашего Telegram-канала будут автоматически появляться в Max "
+            "через несколько секунд.\n\n"
+            "👉 Укажите ссылку на ваш Telegram-канал:\n"
+            "<i>https://t.me/channelname</i>",
+            parse_mode="HTML",
+        )
+        await state.set_state(AutopostStates.waiting_tg_channel)
+    
     await callback.answer()
 
 
@@ -303,8 +361,8 @@ async def show_autopost_management(callback: CallbackQuery, autopost_manager) ->
     
     if active_channels:
         text = (
-            "<b>⚡ Автопостинг</b>\n\n"
-            "Активные автопостинги:\n"
+            "<b>⚡ Управление автопостингом</b>\n\n"
+            "<b>Активные автопостинги:</b>\n"
         )
         
         builder = InlineKeyboardBuilder()
@@ -323,8 +381,8 @@ async def show_autopost_management(callback: CallbackQuery, autopost_manager) ->
     else:
         text = (
             "<b>⚡ Автопостинг</b>\n\n"
-            "У вас нет активных автопостингов.\n\n"
-            "Настройте автопостинг, чтобы новые посты из Telegram автоматически появлялись в Max."
+            "Нет активных автопостингов.\n\n"
+            "Автопостинг включается после переноса контента."
         )
         
         builder = InlineKeyboardBuilder()
@@ -356,3 +414,26 @@ async def stop_autopost_handler(callback: CallbackQuery, autopost_manager) -> No
     
     # Refresh the menu
     await show_autopost_management(callback, autopost_manager)
+
+
+@autopost_router.callback_query(lambda c: c.data == "autopost_new_channel")
+async def start_new_autopost_channel(callback: CallbackQuery, state) -> None:
+    """
+    Start setting up autopost for a new channel (not from verified list).
+    
+    Args:
+        callback: Callback query
+        state: FSM state
+    """
+    await callback.message.edit_text(
+        "<b>⚡ Настройка автопостинга</b>\n\n"
+        "Новые посты из вашего Telegram-канала будут автоматически появляться в Max "
+        "через несколько секунд.\n\n"
+        "👉 Укажите ссылку на ваш Telegram-канал:\n"
+        "<i>https://t.me/channelname</i>",
+        parse_mode="HTML",
+    )
+    
+    # Set FSM state
+    await state.set_state(AutopostStates.waiting_tg_channel)
+    await callback.answer()
