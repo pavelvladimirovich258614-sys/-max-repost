@@ -15,6 +15,7 @@ from bot.database.repositories import (
     PromoCodeRepository,
     PromoActivationRepository,
     LogRepository,
+    VerifiedChannelRepository,
 )
 
 
@@ -56,5 +57,6 @@ class DBMiddleware(BaseMiddleware):
             data["promo_repo"] = PromoCodeRepository(session)
             data["promo_activation_repo"] = PromoActivationRepository(session)
             data["log_repo"] = LogRepository(session)
+            data["verified_channel_repo"] = VerifiedChannelRepository(session)
 
             return await handler(event, data)

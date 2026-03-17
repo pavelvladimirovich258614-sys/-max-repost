@@ -22,12 +22,14 @@ from bot.telegram.keyboards.transfer import (
     saved_max_channels_keyboard,
     confirm_delete_binding_keyboard,
     verify_code_keyboard,
+    verified_channels_keyboard,
 )
 from bot.core.verification import generate_verification_code, verify_channel_ownership
 from bot.max_api.client import MaxClient, MaxAPIError
 from bot.core.telethon_client import get_telethon_client
 from bot.core.transfer_engine import TransferEngine, TransferResult
 from bot.database.repositories.max_channel_binding import MaxChannelBindingRepository
+from bot.database.repositories.verified_channel import VerifiedChannelRepository
 from config.settings import settings
 
 
@@ -201,8 +203,117 @@ async def start_transfer_setup(callback: CallbackQuery, state) -> None:
     await state.set_state(TransferStates.transfer_waiting_tg_channel)
 
 
+@transfer_router.callback_query(lambda c: c.data == "menu_my_channels")
+async def show_my_verified_channels(
+    callback: CallbackQuery,
+    verified_channel_repo: VerifiedChannelRepository,
+) -> None:
+    """
+    Show list of user's verified channels.
+    
+    Allows quick selection of previously verified channels,
+    skipping the verification step.
+    
+    Args:
+        callback: Callback query
+        verified_channel_repo: Repository for verified channels
+    """
+    user_id = callback.from_user.id
+    
+    try:
+        # Get user's verified channels
+        channels = await verified_channel_repo.get_user_verified_channels(user_id)
+        
+        if channels:
+            text = (
+                "<b>📢 Мои каналы</b>\n\n"
+                "Выберите ранее верифицированный канал для переноса:\n"
+            )
+            keyboard = verified_channels_keyboard(channels)
+        else:
+            text = (
+                "<b>📢 Мои каналы</b>\n\n"
+                "У вас пока нет верифицированных каналов.\n\n"
+                "Добавьте канал, чтобы начать перенос постов в Max."
+            )
+            builder = InlineKeyboardBuilder()
+            builder.button(text="➕ Добавить канал", callback_data="start_setup_transfer")
+            builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+            builder.adjust(1)
+            keyboard = builder.as_markup()
+        
+        await callback.message.edit_text(text, reply_markup=keyboard)
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Error loading verified channels for user {user_id}: {e}")
+        await callback.answer("❌ Ошибка загрузки каналов", show_alert=True)
+
+
+@transfer_router.callback_query(lambda c: c.data.startswith("select_verified_channel:"))
+async def select_verified_channel(
+    callback: CallbackQuery,
+    state,
+    bot,
+    db_session,
+    verified_channel_repo: VerifiedChannelRepository,
+) -> None:
+    """
+    Select a verified channel and proceed to Max channel selection.
+    
+    Skips TG channel input and verification since channel is already verified.
+    
+    Args:
+        callback: Callback query
+        state: FSM state
+        bot: Bot instance
+        db_session: Database session
+        verified_channel_repo: Repository for verified channels
+    """
+    # Extract channel username from callback data
+    tg_channel = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    
+    try:
+        # Get channel info from Telegram
+        chat = await bot.get_chat(f"@{tg_channel}")
+        
+        # Store in state
+        await state.update_data(
+            user_id=user_id,
+            chat_id=callback.message.chat.id,
+            bot_message_id=callback.message.message_id,
+            transfer_tg_channel_id=str(chat.id),
+            transfer_tg_channel_title=chat.title,
+            transfer_tg_channel_username=tg_channel,
+        )
+        
+        # Check if channel is still verified (should be, but double-check)
+        is_verified = await verified_channel_repo.is_channel_verified(user_id, tg_channel)
+        if not is_verified:
+            # Should not happen, but handle gracefully
+            await callback.answer("⚠️ Требуется повторная верификация", show_alert=True)
+            await _show_verification_code(callback.message, state, chat.title, db_session, verified_channel_repo)
+            return
+        
+        await callback.answer(f"✅ Канал {chat.title} выбран")
+        
+        # Proceed directly to Max channel selection (skip verification)
+        await _show_max_connection_instructions(callback.message, state, chat.title, db_session)
+        
+    except Exception as e:
+        logger.error(f"Error selecting verified channel {tg_channel}: {e}")
+        await callback.answer("❌ Ошибка выбора канала", show_alert=True)
+
+
 @transfer_router.message(StateFilter(TransferStates.transfer_waiting_tg_channel))
-async def process_transfer_tg_channel(message: Message, state, bot) -> None:
+async def process_transfer_tg_channel(
+    message: Message,
+    state,
+    bot,
+    db_session,
+    verified_channel_repo: VerifiedChannelRepository,
+) -> None:
     """
     Process Telegram channel link for transfer.
 
@@ -212,6 +323,8 @@ async def process_transfer_tg_channel(message: Message, state, bot) -> None:
         message: User message with channel link
         state: FSM state
         bot: Bot instance for API calls
+        db_session: Database session
+        verified_channel_repo: Repository for verified channels
     """
     # Delete user message
     await _delete_user_message(message)
@@ -286,8 +399,8 @@ async def process_transfer_tg_channel(message: Message, state, bot) -> None:
         )
         await state.set_state(TransferStates.transfer_waiting_verification)
     else:
-        # Bot is already admin - proceed to ownership verification
-        await _show_verification_code(message, state, chat.title)
+        # Bot is already admin - proceed to ownership verification (check if already verified)
+        await _show_verification_code(message, state, chat.title, db_session, verified_channel_repo)
 
 
 def _build_continue_keyboard() -> InlineKeyboardMarkup:
@@ -303,15 +416,41 @@ async def _show_verification_code(
     target_message: Message | CallbackQuery,
     state,
     channel_title: str,
+    db_session=None,
+    verified_channel_repo=None,
 ) -> None:
     """
     Show verification code for channel ownership confirmation.
+    
+    If channel is already verified for this user, skip verification
+    and proceed directly to Max channel selection.
     
     Args:
         target_message: Message or CallbackQuery to edit
         state: FSM state
         channel_title: Telegram channel title
+        db_session: Optional database session
+        verified_channel_repo: Optional verified channel repository
     """
+    # Check if we should verify or skip
+    if db_session and verified_channel_repo:
+        data = await state.get_data()
+        user_id = data.get("user_id")
+        tg_channel = data.get("transfer_tg_channel_username")
+        
+        if user_id and tg_channel:
+            is_verified = await verified_channel_repo.is_channel_verified(user_id, tg_channel)
+            if is_verified:
+                # Channel already verified - skip to Max selection
+                logger.info(f"Channel {tg_channel} already verified for user {user_id}, skipping verification")
+                await _edit_or_send_message(
+                    target_message,
+                    text=f"✅ Канал <b>{channel_title}</b> ранее верифицирован.\n\nПереходим к настройке Max...",
+                    state=state,
+                )
+                await _show_max_connection_instructions(target_message, state, channel_title, db_session)
+                return
+    
     # Generate verification code
     code = generate_verification_code()
     await state.update_data(verification_code=code)
@@ -337,7 +476,13 @@ async def _show_verification_code(
 
 
 @transfer_router.callback_query(lambda c: c.data == "transfer_verify_admin", StateFilter(TransferStates.transfer_waiting_verification))
-async def verify_admin_after_prompt(callback: CallbackQuery, state, bot) -> None:
+async def verify_admin_after_prompt(
+    callback: CallbackQuery,
+    state,
+    bot,
+    db_session,
+    verified_channel_repo: VerifiedChannelRepository,
+) -> None:
     """
     Verify bot is now admin after user added it.
 
@@ -345,6 +490,8 @@ async def verify_admin_after_prompt(callback: CallbackQuery, state, bot) -> None
         callback: Callback query
         state: FSM state
         bot: Bot instance
+        db_session: Database session
+        verified_channel_repo: Repository for verified channels
     """
     data = await state.get_data()
     channel_id = data.get("transfer_tg_channel_id")
@@ -367,8 +514,8 @@ async def verify_admin_after_prompt(callback: CallbackQuery, state, bot) -> None
         from aiogram.enums import ChatMemberStatus
 
         if member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
-            # Bot is admin - proceed to ownership verification
-            await _show_verification_code(callback.message, state, channel_title)
+            # Bot is admin - proceed to ownership verification (check if already verified)
+            await _show_verification_code(callback.message, state, channel_title, db_session, verified_channel_repo)
         else:
             await callback.answer("❌ Бот ещё не добавлен в администраторы.", show_alert=True)
 
@@ -468,14 +615,22 @@ async def _show_max_connection_instructions(
 
 
 @transfer_router.callback_query(lambda c: c.data == "verify_check", StateFilter(TransferStates.transfer_verify_code))
-async def check_verification_code(callback: CallbackQuery, state, db_session) -> None:
+async def check_verification_code(
+    callback: CallbackQuery,
+    state,
+    db_session,
+    verified_channel_repo: VerifiedChannelRepository,
+) -> None:
     """
     Check if verification code is present in channel description.
+    
+    If verification succeeds, saves the channel as verified for this user.
     
     Args:
         callback: Callback query
         state: FSM state
         db_session: Database session from middleware
+        verified_channel_repo: Repository for verified channels
     """
     data = await state.get_data()
     code = data.get("verification_code")
@@ -505,6 +660,21 @@ async def check_verification_code(callback: CallbackQuery, state, db_session) ->
         if is_verified:
             await callback.answer("✅ Права подтверждены!", show_alert=True)
             logger.info(f"Channel {tg_channel} ownership verified for user {callback.from_user.id}")
+            
+            # Save channel as verified for this user
+            if verified_channel_repo:
+                try:
+                    data = await state.get_data()
+                    tg_channel_id = data.get("transfer_tg_channel_id")
+                    await verified_channel_repo.verify_channel(
+                        user_id=callback.from_user.id,
+                        tg_channel=tg_channel,
+                        tg_channel_id=tg_channel_id,
+                    )
+                    logger.info(f"Channel {tg_channel} saved as verified for user {callback.from_user.id}")
+                except Exception as e:
+                    logger.error(f"Failed to save verified channel: {e}")
+            
             # Proceed to Max channel selection (pass db_session to load saved bindings)
             await _show_max_connection_instructions(callback.message, state, channel_title, db_session)
         else:

@@ -10,6 +10,8 @@ from bot.database.models import (
     PromoCode,
     PromoActivation,
     Log,
+    MaxChannelBinding,
+    VerifiedChannel,
     PostStatus,
     PaymentStatus,
 )
@@ -26,6 +28,8 @@ __all__ = [
     "PromoCode",
     "PromoActivation",
     "Log",
+    "MaxChannelBinding",
+    "VerifiedChannel",
     "PostStatus",
     "PaymentStatus",
 ]

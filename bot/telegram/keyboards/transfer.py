@@ -186,6 +186,33 @@ def transfer_complete_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def verified_channels_keyboard(channels: list) -> InlineKeyboardMarkup:
+    """
+    Create keyboard for selecting from verified channels.
+
+    Args:
+        channels: List of VerifiedChannel objects
+
+    Returns:
+        Inline keyboard with channel buttons and add new button
+    """
+    builder = InlineKeyboardBuilder()
+    
+    for channel in channels:
+        display_name = channel.tg_channel[:30] if len(channel.tg_channel) <= 30 else channel.tg_channel[:27] + "..."
+        builder.button(
+            text=f"📢 @{display_name}",
+            callback_data=f"select_verified_channel:{channel.tg_channel}",
+        )
+    
+    # Add new channel button
+    builder.button(text="➕ Добавить новый канал", callback_data="start_setup_transfer")
+    builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+    
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def verify_code_keyboard() -> InlineKeyboardMarkup:
     """
     Create keyboard for channel ownership verification.

@@ -8,6 +8,7 @@ from bot.database.repositories.payment import PaymentRepository
 from bot.database.repositories.promo import PromoCodeRepository, PromoActivationRepository
 from bot.database.repositories.log import LogRepository
 from bot.database.repositories.max_channel_binding import MaxChannelBindingRepository
+from bot.database.repositories.verified_channel import VerifiedChannelRepository
 
 __all__ = [
     "BaseRepository",
@@ -19,4 +20,5 @@ __all__ = [
     "PromoActivationRepository",
     "LogRepository",
     "MaxChannelBindingRepository",
+    "VerifiedChannelRepository",
 ]

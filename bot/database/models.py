@@ -414,6 +414,50 @@ class MaxChannelBinding(Base):
             return f"<MaxChannelBinding(user_id={self.user_id}, tg={self.tg_channel}, max={self.max_chat_id})>"
 
 
+class VerifiedChannel(Base):
+    """
+    Storage for verified Telegram channels.
+    
+    Users who have verified channel ownership don't need to verify again.
+    
+    Attributes:
+        id: Primary key
+        user_id: Telegram user ID
+        tg_channel: Telegram channel username
+        tg_channel_id: Telegram channel numeric ID
+        verified_at: When verification was completed
+    """
+    
+    __tablename__ = "verified_channels"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        index=True,
+    )
+    tg_channel: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        index=True,
+    )
+    tg_channel_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    verified_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    
+    # Unique constraint: one verification per user per channel
+    __table_args__ = (
+        UniqueConstraint("user_id", "tg_channel", name="uq_user_verified_channel"),
+        Index("ix_verified_channels_user_lookup", "user_id", "verified_at"),
+    )
+    
+    def __repr__(self) -> str:
+        return f"<VerifiedChannel(user_id={self.user_id}, tg={self.tg_channel})>"
+
+
 class Log(Base):
     """
     Audit log for user actions.
