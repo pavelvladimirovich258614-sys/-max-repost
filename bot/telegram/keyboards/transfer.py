@@ -1,7 +1,83 @@
 """Inline keyboards for post transfer flow."""
 
+from datetime import datetime
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+
+def saved_max_channels_keyboard(
+    bindings: list,
+    show_delete: bool = False,
+) -> InlineKeyboardMarkup:
+    """
+    Create keyboard for selecting saved Max channels.
+
+    Args:
+        bindings: List of MaxChannelBinding objects
+        show_delete: Whether to show delete buttons
+
+    Returns:
+        Inline keyboard with saved channels and add new button
+    """
+    builder = InlineKeyboardBuilder()
+    
+    for binding in bindings:
+        # Format display name
+        if binding.max_channel_name:
+            display_name = binding.max_channel_name[:30]
+        else:
+            display_name = f"ID: {binding.max_chat_id}"
+        
+        # Format last used time
+        if binding.last_used_at:
+            if isinstance(binding.last_used_at, datetime):
+                last_used = binding.last_used_at.strftime("%d.%m.%Y")
+            else:
+                last_used = str(binding.last_used_at)[:10]
+        else:
+            last_used = "неизвестно"
+        
+        # Main button to select this channel
+        builder.button(
+            text=f"📺 {display_name} ({last_used})",
+            callback_data=f"transfer_select_saved_max:{binding.id}",
+        )
+        
+        # Delete button if requested
+        if show_delete:
+            builder.button(
+                text="🗑 Удалить",
+                callback_data=f"transfer_delete_saved_max:{binding.id}",
+            )
+    
+    # Add new channel button
+    builder.button(text="➕ Добавить новый канал", callback_data="transfer_add_new_max")
+    builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+    
+    # Adjust: 2 columns if showing delete buttons, 1 column otherwise
+    if show_delete:
+        builder.adjust(2, repeat=True)
+    else:
+        builder.adjust(1)
+    
+    return builder.as_markup()
+
+
+def confirm_delete_binding_keyboard(binding_id: int) -> InlineKeyboardMarkup:
+    """
+    Create keyboard for confirming deletion of a binding.
+
+    Args:
+        binding_id: Binding ID to delete
+
+    Returns:
+        Inline keyboard with confirm/cancel buttons
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, удалить", callback_data=f"transfer_confirm_delete_binding:{binding_id}")
+    builder.button(text="❌ Отмена", callback_data="transfer_cancel_delete_binding")
+    builder.adjust(2)
+    return builder.as_markup()
 
 
 def detect_channel_keyboard() -> InlineKeyboardMarkup:

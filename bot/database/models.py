@@ -359,6 +359,61 @@ class PromoActivation(Base):
         return f"<PromoActivation(id={self.id}, promo_id={self.promo_code_id}, user_id={self.user_id})>"
 
 
+class MaxChannelBinding(Base):
+        """
+        Storage for TG -> Max channel bindings for transfer feature.
+        
+        Allows users to quickly reuse previously configured Max channels.
+        
+        Attributes:
+            id: Primary key
+            user_id: Telegram user ID
+            tg_channel: Telegram channel username/link
+            tg_channel_id: Telegram channel ID (numeric)
+            max_chat_id: Max channel chat_id (numeric)
+            max_channel_name: Optional name of Max channel
+            created_at: When binding was created
+            last_used_at: When binding was last used
+        """
+        
+        __tablename__ = "max_channel_bindings"
+        
+        id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+        user_id: Mapped[int] = mapped_column(
+            Integer,
+            nullable=False,
+            index=True,
+        )
+        tg_channel: Mapped[str] = mapped_column(
+            String(100),
+            nullable=False,
+            index=True,
+        )
+        tg_channel_id: Mapped[str] = mapped_column(String(100), nullable=False)
+        max_chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
+        max_channel_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+        created_at: Mapped[datetime] = mapped_column(
+            DateTime(timezone=True),
+            server_default=func.now(),
+            nullable=False,
+        )
+        last_used_at: Mapped[datetime] = mapped_column(
+            DateTime(timezone=True),
+            server_default=func.now(),
+            onupdate=func.now(),
+            nullable=False,
+        )
+        
+        # Index for fast lookup by user + tg_channel
+        __table_args__ = (
+            UniqueConstraint("user_id", "tg_channel", "max_chat_id", name="uq_user_tg_max"),
+            Index("ix_max_bindings_user_lookup", "user_id", "tg_channel", "last_used_at"),
+        )
+        
+        def __repr__(self) -> str:
+            return f"<MaxChannelBinding(user_id={self.user_id}, tg={self.tg_channel}, max={self.max_chat_id})>"
+
+
 class Log(Base):
     """
     Audit log for user actions.

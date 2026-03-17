@@ -19,10 +19,13 @@ from bot.telegram.keyboards.transfer import (
     retry_detect_keyboard,
     select_count_keyboard,
     transfer_complete_keyboard,
+    saved_max_channels_keyboard,
+    confirm_delete_binding_keyboard,
 )
 from bot.max_api.client import MaxClient, MaxAPIError
 from bot.core.telethon_client import get_telethon_client
 from bot.core.transfer_engine import TransferEngine, TransferResult
+from bot.database.repositories.max_channel_binding import MaxChannelBindingRepository
 from config.settings import settings
 
 
@@ -83,6 +86,9 @@ async def start_transfer_setup(callback: CallbackQuery, state) -> None:
         callback: Callback query
         state: FSM state
     """
+    # Store user_id in state for later use
+    await state.update_data(user_id=callback.from_user.id)
+    
     await callback.message.edit_text(
         "<b>🔗 Пришлите ссылку на ваш Telegram-канал</b>\n\n"
         "Мы выполним перенос постов в 4 этапа:\n"
@@ -221,35 +227,85 @@ async def verify_admin_after_prompt(callback: CallbackQuery, state, bot) -> None
         await callback.answer("❌ Ошибка проверки. Попробуйте снова.", show_alert=True)
 
 
-async def _show_max_connection_instructions(message: Message, state, channel_title: str) -> None:
+async def _show_max_connection_instructions(
+    message: Message,
+    state,
+    channel_title: str,
+    db_session=None,
+) -> None:
     """
-    Show Max channel connection instructions.
+    Show Max channel connection instructions or saved channels list.
+    
+    If user has saved Max channel bindings for this TG channel,
+    shows them for quick selection. Otherwise shows connection instructions.
 
     Args:
         message: Message to edit or send
         state: FSM state
         channel_title: Telegram channel title
+        db_session: Optional database session
     """
-    text = (
-        f"✅ Канал <b>{channel_title}</b> подтвержден!\n\n"
-        f"Теперь подключите канал в MAX.\n\n"
-        f"<b>Инструкция:</b>\n"
-        f"1. Откройте <b>Настройки канала ➡ Подписчики</b>\n"
-        f"2. Добавьте подписчика «Репост» ({MAX_BOT_USERNAME})\n"
-        f"3. Перейдите в <b>Настройки канала ➡ Администраторы</b>\n"
-        f"4. Добавьте администратора «Репост» ({MAX_BOT_USERNAME})\n"
-        f"5. Включите <b>«Писать посты»</b> и сохраните\n\n"
-        f"➡ <b>Вернитесь сюда и отправьте ссылку на канал в MAX</b>\n"
-        f"<i>https://max.me/username или ID канала</i>\n\n"
-        f"⚠️ Если Max не находит бота по нику — попробуйте найти по названию «Репост»"
-    )
-
-    if isinstance(message, CallbackQuery):
-        await message.message.edit_text(text, parse_mode="HTML")
+    # Get user_id and tg_channel from state
+    state_data = await state.get_data()
+    user_id = state_data.get("user_id")
+    tg_channel = state_data.get("transfer_tg_channel_username")
+    tg_channel_id = state_data.get("transfer_tg_channel_id")
+    
+    # Store tg_channel_id in state for later use
+    if tg_channel_id:
+        await state.update_data(transfer_tg_channel_id=tg_channel_id)
+    
+    # Check for saved bindings if we have db session
+    saved_bindings = []
+    if db_session and user_id and tg_channel:
+        try:
+            binding_repo = MaxChannelBindingRepository(db_session)
+            saved_bindings = await binding_repo.get_by_user_and_tg_channel(
+                user_id=user_id,
+                tg_channel=tg_channel,
+            )
+            logger.info(f"Found {len(saved_bindings)} saved Max bindings for user {user_id}, tg_channel {tg_channel}")
+        except Exception as e:
+            logger.warning(f"Failed to load saved bindings: {e}")
+    
+    if saved_bindings:
+        # Show saved channels list
+        text = (
+            f"✅ Канал <b>{channel_title}</b> подтвержден!\n\n"
+            f"📋 <b>Сохранённые каналы Max:</b>\n"
+            f"Выберите канал для переноса или добавьте новый:"
+        )
+        
+        keyboard = saved_max_channels_keyboard(saved_bindings, show_delete=True)
+        
+        if isinstance(message, CallbackQuery):
+            await message.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        else:
+            await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+        
+        await state.set_state(TransferStates.transfer_select_saved_max)
     else:
-        await message.answer(text, parse_mode="HTML", reply_markup=back_keyboard())
+        # No saved bindings - show connection instructions
+        text = (
+            f"✅ Канал <b>{channel_title}</b> подтвержден!\n\n"
+            f"Теперь подключите канал в MAX.\n\n"
+            f"<b>Инструкция:</b>\n"
+            f"1. Откройте <b>Настройки канала ➡ Подписчики</b>\n"
+            f"2. Добавьте подписчика «Репост» ({MAX_BOT_USERNAME})\n"
+            f"3. Перейдите в <b>Настройки канала ➡ Администраторы</b>\n"
+            f"4. Добавьте администратора «Репост» ({MAX_BOT_USERNAME})\n"
+            f"5. Включите <b>«Писать посты»</b> и сохраните\n\n"
+            f"➡ <b>Вернитесь сюда и отправьте ссылку на канал в MAX</b>\n"
+            f"<i>https://max.me/username или ID канала</i>\n\n"
+            f"⚠️ Если Max не находит бота по нику — попробуйте найти по названию «Репост»"
+        )
 
-    await state.set_state(TransferStates.transfer_waiting_max_channel)
+        if isinstance(message, CallbackQuery):
+            await message.message.edit_text(text, parse_mode="HTML")
+        else:
+            await message.answer(text, parse_mode="HTML", reply_markup=back_keyboard())
+
+        await state.set_state(TransferStates.transfer_waiting_max_channel)
 
 
 # =============================================================================
@@ -338,13 +394,14 @@ async def detect_channel_auto(callback: CallbackQuery, state) -> None:
 
 
 @transfer_router.callback_query(lambda c: c.data.startswith("transfer_confirm_channel:"), StateFilter(TransferStates.transfer_detect_max_channel))
-async def confirm_detected_channel(callback: CallbackQuery, state) -> None:
+async def confirm_detected_channel(callback: CallbackQuery, state, db_session) -> None:
     """
     Confirm using the detected channel chat_id.
 
     Args:
         callback: Callback query
         state: FSM state
+        db_session: Database session
     """
     # Extract chat_id from callback data
     chat_id = int(callback.data.split(":")[1])
@@ -355,8 +412,8 @@ async def confirm_detected_channel(callback: CallbackQuery, state) -> None:
 
     await callback.answer("✅ Канал выбран")
 
-    # Continue to post counting
-    await _continue_after_max_channel_set(callback.message, state)
+    # Continue to post counting (save binding for future use)
+    await _continue_after_max_channel_set(callback.message, state, db_session)
 
 
 @transfer_router.callback_query(lambda c: c.data == "transfer_reject_channel", StateFilter(TransferStates.transfer_detect_max_channel))
@@ -376,6 +433,157 @@ async def reject_detected_channel(callback: CallbackQuery, state) -> None:
         reply_markup=detect_channel_keyboard(),
     )
     await callback.answer()
+
+
+# =============================================================================
+# Saved Max Channels Handlers
+# =============================================================================
+
+
+@transfer_router.callback_query(lambda c: c.data.startswith("transfer_select_saved_max:"), StateFilter(TransferStates.transfer_select_saved_max))
+async def select_saved_max_channel(callback: CallbackQuery, state, db_session) -> None:
+    """
+    Select a saved Max channel for transfer.
+    
+    Args:
+        callback: Callback query
+        state: FSM state
+        db_session: Database session
+    """
+    # Extract binding_id from callback data
+    binding_id = int(callback.data.split(":")[1])
+    
+    try:
+        # Get binding from database
+        binding_repo = MaxChannelBindingRepository(db_session)
+        binding = await binding_repo.get(binding_id)
+        
+        if not binding:
+            await callback.answer("❌ Канал не найден", show_alert=True)
+            return
+        
+        # Store max_channel_id in state
+        await state.update_data(transfer_max_channel_id=int(binding.max_chat_id))
+        logger.info(f"Selected saved Max channel: {binding.max_chat_id} (binding_id={binding_id})")
+        
+        # Update last_used_at (already updated, no need to save binding again)
+        await binding_repo.update_last_used(binding_id)
+        
+        await callback.answer("✅ Канал выбран")
+        
+        # Continue to post counting (don't save binding again for saved channels)
+        await _continue_after_max_channel_set(callback.message, state, db_session=None)
+        
+    except Exception as e:
+        logger.error(f"Error selecting saved channel: {e}")
+        await callback.answer("❌ Ошибка выбора канала", show_alert=True)
+
+
+@transfer_router.callback_query(lambda c: c.data == "transfer_add_new_max", StateFilter(TransferStates.transfer_select_saved_max))
+async def add_new_max_channel(callback: CallbackQuery, state) -> None:
+    """
+    User wants to add a new Max channel (not using saved one).
+    
+    Args:
+        callback: Callback query
+        state: FSM state
+    """
+    state_data = await state.get_data()
+    channel_title = state_data.get("transfer_tg_channel_title", "Канал")
+    
+    text = (
+        f"✅ Канал <b>{channel_title}</b> подтвержден!\n\n"
+        f"Теперь подключите канал в MAX.\n\n"
+        f"<b>Инструкция:</b>\n"
+        f"1. Откройте <b>Настройки канала ➡ Подписчики</b>\n"
+        f"2. Добавьте подписчика «Репост» ({MAX_BOT_USERNAME})\n"
+        f"3. Перейдите в <b>Настройки канала ➡ Администраторы</b>\n"
+        f"4. Добавьте администратора «Репост» ({MAX_BOT_USERNAME})\n"
+        f"5. Включите <b>«Писать посты»</b> и сохраните\n\n"
+        f"➡ <b>Вернитесь сюда и отправьте ссылку на канал в MAX</b>\n"
+        f"<i>https://max.me/username или ID канала</i>\n\n"
+        f"⚠️ Если Max не находит бота по нику — попробуйте найти по названию «Репост»"
+    )
+    
+    await callback.message.edit_text(text, parse_mode="HTML")
+    await callback.answer()
+    await state.set_state(TransferStates.transfer_waiting_max_channel)
+
+
+@transfer_router.callback_query(lambda c: c.data.startswith("transfer_delete_saved_max:"), StateFilter(TransferStates.transfer_select_saved_max))
+async def delete_saved_max_channel_prompt(callback: CallbackQuery, state) -> None:
+    """
+    Show confirmation for deleting a saved Max channel binding.
+    
+    Args:
+        callback: Callback query
+        state: FSM state
+    """
+    binding_id = int(callback.data.split(":")[1])
+    
+    text = (
+        "🗑 <b>Удаление канала</b>\n\n"
+        "Вы уверены, что хотите удалить этот канал из сохранённых?\n\n"
+        "Это не удалит канал в Max, только уберёт из списка быстрого доступа."
+    )
+    
+    await callback.message.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=confirm_delete_binding_keyboard(binding_id),
+    )
+    await callback.answer()
+    await state.set_state(TransferStates.transfer_select_saved_max)
+
+
+@transfer_router.callback_query(lambda c: c.data.startswith("transfer_confirm_delete_binding:"), StateFilter(TransferStates.transfer_select_saved_max))
+async def confirm_delete_binding(callback: CallbackQuery, state, db_session) -> None:
+    """
+    Confirm deletion of a saved Max channel binding.
+    
+    Args:
+        callback: Callback query
+        state: FSM state
+        db_session: Database session
+    """
+    binding_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+    
+    try:
+        binding_repo = MaxChannelBindingRepository(db_session)
+        deleted = await binding_repo.delete_binding(user_id, binding_id)
+        
+        if deleted:
+            await callback.answer("✅ Канал удалён", show_alert=True)
+            logger.info(f"User {user_id} deleted binding {binding_id}")
+        else:
+            await callback.answer("❌ Канал не найден", show_alert=True)
+            
+        # Refresh the list
+        state_data = await state.get_data()
+        channel_title = state_data.get("transfer_tg_channel_title", "Канал")
+        await _show_max_connection_instructions(callback.message, state, channel_title, db_session)
+        
+    except Exception as e:
+        logger.error(f"Error deleting binding: {e}")
+        await callback.answer("❌ Ошибка удаления", show_alert=True)
+
+
+@transfer_router.callback_query(lambda c: c.data == "transfer_cancel_delete_binding", StateFilter(TransferStates.transfer_select_saved_max))
+async def cancel_delete_binding(callback: CallbackQuery, state, db_session) -> None:
+    """
+    Cancel deletion and return to saved channels list.
+    
+    Args:
+        callback: Callback query
+        state: FSM state
+        db_session: Database session
+    """
+    state_data = await state.get_data()
+    channel_title = state_data.get("transfer_tg_channel_title", "Канал")
+    
+    await callback.answer("Отменено")
+    await _show_max_connection_instructions(callback.message, state, channel_title, db_session)
 
 
 # =============================================================================
@@ -620,13 +828,14 @@ async def prompt_manual_chat_id(callback: CallbackQuery, state) -> None:
 
 
 @transfer_router.message(StateFilter(TransferStates.transfer_enter_max_chat_id))
-async def process_manual_chat_id(message: Message, state) -> None:
+async def process_manual_chat_id(message: Message, state, db_session) -> None:
     """
     Process manually entered Max chat_id.
     
     Args:
         message: User message with chat_id
         state: FSM state
+        db_session: Database session
     """
     text = message.text.strip()
     
@@ -658,12 +867,51 @@ async def process_manual_chat_id(message: Message, state) -> None:
     await state.update_data(transfer_max_channel_id=chat_id)
     logger.info(f"Manually entered chat_id: {chat_id}")
     
-    # Proceed to count posts
-    await _continue_after_max_channel_set(message, state)
+    # Proceed to count posts (save binding for future use)
+    await _continue_after_max_channel_set(message, state, db_session)
 
 
-async def _continue_after_max_channel_set(message: Message, state) -> None:
+async def _save_max_channel_binding(state, db_session=None) -> None:
+    """
+    Save Max channel binding to database for future use.
+    
+    Args:
+        state: FSM state with channel info
+        db_session: Optional database session
+    """
+    if not db_session:
+        return
+    
+    try:
+        data = await state.get_data()
+        user_id = data.get("user_id")
+        tg_channel = data.get("transfer_tg_channel_username")
+        tg_channel_id = data.get("transfer_tg_channel_id")
+        max_channel_id = data.get("transfer_max_channel_id")
+        
+        if not all([user_id, tg_channel, tg_channel_id, max_channel_id]):
+            logger.warning("Cannot save binding: missing required data")
+            return
+        
+        binding_repo = MaxChannelBindingRepository(db_session)
+        await binding_repo.create_or_update(
+            user_id=user_id,
+            tg_channel=tg_channel,
+            tg_channel_id=str(tg_channel_id),
+            max_chat_id=str(max_channel_id),
+            max_channel_name=None,  # Could be fetched from Max API if needed
+        )
+        logger.info(f"Saved Max channel binding: user={user_id}, tg={tg_channel}, max={max_channel_id}")
+        
+    except Exception as e:
+        logger.error(f"Failed to save Max channel binding: {e}")
+
+
+async def _continue_after_max_channel_set(message: Message, state, db_session=None) -> None:
     """Continue flow after max_channel_id is set (either from API or manual entry)."""
+    # Save the binding for future use
+    await _save_max_channel_binding(state, db_session)
+    
     # Get channel info
     data = await state.get_data()
     channel_title = data.get("transfer_tg_channel_title", "Канал")
@@ -706,13 +954,14 @@ async def _continue_after_max_channel_set(message: Message, state) -> None:
 
 
 @transfer_router.message(StateFilter(TransferStates.transfer_waiting_max_channel))
-async def process_transfer_max_channel(message: Message, state) -> None:
+async def process_transfer_max_channel(message: Message, state, db_session) -> None:
     """
     Process Max channel link for transfer.
 
     Args:
         message: User message with Max channel link/ID
         state: FSM state
+        db_session: Database session
     """
     text = message.text.strip()
 
@@ -804,8 +1053,8 @@ async def process_transfer_max_channel(message: Message, state) -> None:
     # Store numeric Max channel ID
     await state.update_data(transfer_max_channel_id=max_channel_id)
     
-    # Continue to post counting
-    await _continue_after_max_channel_set(message, state)
+    # Continue to post counting (save binding for future use)
+    await _continue_after_max_channel_set(message, state, db_session)
 
     # Get channel info
     data = await state.get_data()

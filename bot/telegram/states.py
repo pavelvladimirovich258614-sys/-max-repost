@@ -16,6 +16,7 @@ class TransferStates(StatesGroup):
 
     transfer_waiting_tg_channel = State()  # Waiting for TG channel link
     transfer_waiting_verification = State()  # Waiting for channel verification
+    transfer_select_saved_max = State()  # Selecting from saved Max channels
     transfer_waiting_max_channel = State()  # Waiting for Max channel link
     transfer_detect_max_channel = State()  # Auto-detecting Max channel ID via updates
     transfer_enter_max_chat_id = State()  # Manual entry of Max chat_id (when /chats empty)
