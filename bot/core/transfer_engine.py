@@ -288,6 +288,9 @@ def detect_media_type(message: Message) -> str:
             if isinstance(attr, DocumentAttributeVideo):
                 return MediaType.VIDEO
             if isinstance(attr, DocumentAttributeAudio):
+                # Check if it's a voice message (voice=True)
+                if getattr(attr, 'voice', False):
+                    return MediaType.AUDIO  # Voice messages sent as audio
                 return MediaType.AUDIO
             if isinstance(attr, DocumentAttributeFilename):
                 # Check extension
@@ -296,7 +299,7 @@ def detect_media_type(message: Message) -> str:
                     return MediaType.PHOTO
                 if filename.endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm')):
                     return MediaType.VIDEO
-                if filename.endswith(('.mp3', '.ogg', '.wav', '.flac', '.m4a')):
+                if filename.endswith(('.mp3', '.ogg', '.wav', '.flac', '.m4a', '.oga')):
                     return MediaType.AUDIO
 
         return MediaType.FILE

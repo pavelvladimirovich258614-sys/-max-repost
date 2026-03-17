@@ -41,7 +41,7 @@ def menu_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="💎 Проверить баланс", callback_data="menu_balance")
     builder.button(text="🎁 Бонусные посты", callback_data="menu_bonus")
     builder.button(text="🎟 Активировать промокод", callback_data="menu_promo")
-    builder.button(text="ℹ️ Помощь", callback_data="menu_help")
+    builder.button(text="❓ Инструкция", callback_data="menu_help")
 
     builder.adjust(1)
     return builder.as_markup()
