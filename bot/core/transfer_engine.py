@@ -539,8 +539,9 @@ class TransferEngine:
             # Determine target count
             target_count = None if count == "all" else int(count)
             
-            # For "all" we still need some safety limit
-            iter_limit = None if target_count is None else target_count * 10  # Safety: scan up to 10x
+            # No iter_limit - scan until we find enough posts or hit safety limit
+            # Safety limit junk_scanned=1000 protects from infinite loops
+            iter_limit = None
 
             # Fetch messages (oldest first for correct order in Max)
             logger.info(f"Starting transfer: @{tg_channel} -> {max_channel_id}, target={count}")
@@ -551,7 +552,7 @@ class TransferEngine:
 
             async for message in client.iter_messages(
                 tg_channel,
-                limit=iter_limit,
+                limit=iter_limit,  # No limit - scan all if needed
                 reverse=True,  # Oldest first
             ):
                 if self._abort_flag:
@@ -576,7 +577,12 @@ class TransferEngine:
                 )
                 if is_junk:
                     junk_scanned += 1
-                    logger.debug(f"Skipping junk message {message.id}: action={message.action is not None}, has_content={bool(message.text or message.raw_text or message.media)}")
+                    # Log first 10 junk messages in detail for debugging
+                    if junk_scanned <= 10:
+                        action_name = type(message.action).__name__ if message.action else None
+                        logger.info(f"Junk #{junk_scanned}: id={message.id}, action={action_name}, text={bool(message.text)}, media={bool(message.media)}")
+                    elif junk_scanned == 11:
+                        logger.info("Junk logging suppressed after 10 messages, continuing count...")
                     continue
 
                 # Now this is a real post - count it
