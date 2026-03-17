@@ -274,10 +274,15 @@ def detect_media_type(message: Message) -> str:
     Returns:
         MediaType constant string
     """
+    # DIAGNOSTIC: Log what media we received
+    if message.media:
+        logger.info(f"detect_media_type: message.id={message.id}, media_type={type(message.media).__name__}")
+    
     if not message.media:
         return MediaType.TEXT  # Text only, no media
 
     if isinstance(message.media, MessageMediaPhoto):
+        logger.info(f"detect_media_type: detected PHOTO for message {message.id}")
         return MediaType.PHOTO
 
     if isinstance(message.media, MessageMediaDocument):
@@ -288,22 +293,27 @@ def detect_media_type(message: Message) -> str:
         # Check attributes for more specific type
         for attr in doc.attributes:
             if isinstance(attr, DocumentAttributeVideo):
+                logger.info(f"detect_media_type: detected VIDEO for message {message.id}")
                 return MediaType.VIDEO
             if isinstance(attr, DocumentAttributeAudio):
                 # Check if it's a voice message (voice=True)
-                if getattr(attr, 'voice', False):
-                    return MediaType.AUDIO  # Voice messages sent as audio
+                is_voice = getattr(attr, 'voice', False)
+                logger.info(f"detect_media_type: detected AUDIO (voice={is_voice}) for message {message.id}")
                 return MediaType.AUDIO
             if isinstance(attr, DocumentAttributeFilename):
                 # Check extension
                 filename = attr.file_name.lower()
                 if filename.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
+                    logger.info(f"detect_media_type: detected PHOTO (by filename) for message {message.id}")
                     return MediaType.PHOTO
                 if filename.endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm')):
+                    logger.info(f"detect_media_type: detected VIDEO (by filename) for message {message.id}")
                     return MediaType.VIDEO
                 if filename.endswith(('.mp3', '.ogg', '.wav', '.flac', '.m4a', '.oga')):
+                    logger.info(f"detect_media_type: detected AUDIO (by filename) for message {message.id}")
                     return MediaType.AUDIO
 
+        logger.info(f"detect_media_type: detected FILE (generic document) for message {message.id}")
         return MediaType.FILE
 
     # Unsupported types - will be skipped
@@ -317,8 +327,10 @@ def detect_media_type(message: Message) -> str:
         MessageMediaInvoice,
         MessageMediaUnsupported,
     )):
+        logger.info(f"detect_media_type: detected UNSUPPORTED ({type(message.media).__name__}) for message {message.id}")
         return MediaType.UNSUPPORTED
 
+    logger.info(f"detect_media_type: detected UNSUPPORTED (unknown type: {type(message.media).__name__}) for message {message.id}")
     return MediaType.UNSUPPORTED
 
 
@@ -407,6 +419,7 @@ def should_skip_message(message: Message, post_index: int = 0) -> tuple[bool, st
 
     # Skip empty messages (no text AND no media)
     if not has_text and not has_media:
+        logger.info(f"Post {post_index}: SKIP CONDITION TRIGGERED - empty message (has_text={has_text}, has_media={has_media})")
         return True, "empty message (no text, no media)"
     
     # After the check, log media-only posts
@@ -415,15 +428,17 @@ def should_skip_message(message: Message, post_index: int = 0) -> tuple[bool, st
 
     # Skip service messages
     if message.action:
+        logger.info(f"Post {post_index}: SKIP CONDITION TRIGGERED - service message: {type(message.action).__name__}")
         return True, f"service message: {type(message.action).__name__}"
 
     # Check unsupported media types
     detected_type = detect_media_type(message)
     if detected_type == MediaType.UNSUPPORTED:
-        if isinstance(message.media, MessageMediaWebPage):
-            return True, "link preview"
-        return True, f"unsupported media: {type(message.media).__name__}"
+        skip_reason = "link preview" if isinstance(message.media, MessageMediaWebPage) else f"unsupported media: {type(message.media).__name__}"
+        logger.info(f"Post {post_index}: SKIP CONDITION TRIGGERED - {skip_reason}")
+        return True, skip_reason
 
+    logger.info(f"Post {post_index}: WILL NOT SKIP - has_text={has_text}, has_media={has_media}, detected_type={detected_type}")
     return False, ""
 
 
