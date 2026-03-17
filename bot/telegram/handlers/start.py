@@ -21,7 +21,7 @@ TG_BOT_USERNAME = "maxx_repost_bot"
 MAX_BOT_NAME = "Репост"
 MAX_BOT_USERNAME = "id752703975446_1_bot"
 MAX_BOT_LINK = "https://max.ru/id752703975446_1_bot"
-SUPPORT_BOT = "@MAXPosterSupport"
+SUPPORT_BOT = "@maxx_repost_support"
 
 # Welcome sticker
 WELCOME_STICKER = "CAACAgIAAxkBAAIhSmm5Iq9RaarKBrdOXPkDrOKyC-ROAALwFwACKWWpSS1UtcEXnRxkOgQ"
@@ -40,7 +40,7 @@ def get_welcome_message(first_name: str) -> str:
     """Generate personalized welcome message."""
     return f"""<b>👋 Привет, {first_name}!</b>
 
-Я — <b>MAX Постер</b> 🤖
+Я — <b>Репост</b> 🤖
 Переношу посты из Telegram в Max и настраиваю автопостинг.
 
 🎁 <b>Для новых пользователей — 5 постов бесплатно!</b>
@@ -74,7 +74,7 @@ INSTRUCTION_MESSAGE = """
 ✅ Документы и файлы (до 4 ГБ)
 ✅ Ссылки
 
-<b>❓ Поддержка:</b> @MAXPosterSupport
+<b>❓ Поддержка:</b> @maxx_repost_support
 """
 
 # Alias for backwards compatibility
