@@ -149,3 +149,30 @@ class UserRepository(BaseRepository[User]):
         stmt = select(User).where(User.is_admin == True)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def add_free_posts_used(
+        self,
+        user_id: int,
+        count: int,
+    ) -> User | None:
+        """
+        Add to the count of free posts used by user.
+        Ensures the total doesn't exceed FREE_POSTS_LIMIT.
+
+        Args:
+            user_id: User ID
+            count: Number of free posts to add to the used count
+
+        Returns:
+            Updated user instance or None
+        """
+        from sqlalchemy import func
+
+        stmt = (
+            update(User)
+            .where(User.id == user_id)
+            .values(free_posts_used=func.least(User.free_posts_used + count, User.FREE_POSTS_LIMIT))
+            .returning(User)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalars().first()

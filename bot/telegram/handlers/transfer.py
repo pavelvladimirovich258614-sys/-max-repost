@@ -299,7 +299,7 @@ async def select_verified_channel(
         await callback.answer(f"✅ Канал {chat.title} выбран")
         
         # Proceed directly to Max channel selection (skip verification)
-        await _show_max_connection_instructions(callback.message, state, chat.title, db_session)
+        await _show_max_connection_instructions(callback.message, state, chat.title, db_session, user_repo=None)
         
     except Exception as e:
         logger.error(f"Error selecting verified channel {tg_channel}: {e}")
@@ -529,6 +529,7 @@ async def _show_max_connection_instructions(
     state,
     channel_title: str,
     db_session=None,
+    user_repo=None,
 ) -> None:
     """
     Show Max channel connection instructions or saved channels list.
@@ -676,7 +677,7 @@ async def check_verification_code(
                     logger.error(f"Failed to save verified channel: {e}")
             
             # Proceed to Max channel selection (pass db_session to load saved bindings)
-            await _show_max_connection_instructions(callback.message, state, channel_title, db_session)
+            await _show_max_connection_instructions(callback.message, state, channel_title, db_session, user_repo=None)
         else:
             await callback.answer("❌ Код не найден", show_alert=True)
             await callback.message.edit_text(
@@ -858,7 +859,7 @@ async def confirm_detected_channel(callback: CallbackQuery, state, db_session) -
     await callback.answer("✅ Канал выбран")
 
     # Continue to post counting (save binding for future use)
-    await _continue_after_max_channel_set(callback.message, state, db_session)
+    await _continue_after_max_channel_set(callback.message, state, db_session, user_repo=None)
 
 
 @transfer_router.callback_query(lambda c: c.data == "transfer_reject_channel", StateFilter(TransferStates.transfer_detect_max_channel))
@@ -1042,6 +1043,7 @@ async def _execute_transfer(
     count: int | str,
     is_callback: bool = False,
     db_session=None,
+    user_repo=None,
 ) -> None:
     """
     Execute the actual transfer process.
@@ -1052,6 +1054,7 @@ async def _execute_transfer(
         count: Number of posts to transfer or "all"
         is_callback: Whether message comes from callback query
         db_session: Optional database session for duplicate tracking
+        user_repo: Optional user repository for tracking free posts
     """
     import asyncio
     
@@ -1157,6 +1160,16 @@ async def _execute_transfer(
 
         # Close clients
         await max_client.close()
+
+        # Update free_posts_used if this was a free transfer
+        data = await state.get_data()
+        using_free_posts = data.get("using_free_posts", False)
+        if using_free_posts and user_repo and result.success > 0:
+            try:
+                await user_repo.add_free_posts_used(user_id, result.success)
+                logger.info(f"Updated free_posts_used for user {user_id}: +{result.success}")
+            except Exception as e:
+                logger.error(f"Failed to update free_posts_used for user {user_id}: {e}")
 
         # Send completion sticker
         try:
@@ -1356,7 +1369,7 @@ async def prompt_manual_chat_id(callback: CallbackQuery, state) -> None:
 
 
 @transfer_router.message(StateFilter(TransferStates.transfer_enter_max_chat_id))
-async def process_manual_chat_id(message: Message, state, db_session) -> None:
+async def process_manual_chat_id(message: Message, state, db_session, user_repo) -> None:
     """
     Process manually entered Max chat_id.
     
@@ -1401,7 +1414,7 @@ async def process_manual_chat_id(message: Message, state, db_session) -> None:
     logger.info(f"Manually entered chat_id: {chat_id}")
     
     # Proceed to count posts (save binding for future use)
-    await _continue_after_max_channel_set(message, state, db_session)
+    await _continue_after_max_channel_set(message, state, db_session, user_repo)
 
 
 async def _save_max_channel_binding(state, db_session=None) -> None:
@@ -1440,7 +1453,12 @@ async def _save_max_channel_binding(state, db_session=None) -> None:
         logger.error(f"Failed to save Max channel binding: {e}")
 
 
-async def _continue_after_max_channel_set(target_message: Message | CallbackQuery, state, db_session=None) -> None:
+async def _continue_after_max_channel_set(
+    target_message: Message | CallbackQuery,
+    state,
+    db_session=None,
+    user_repo=None,
+) -> None:
     """Continue flow after max_channel_id is set (either from API or manual entry)."""
     # Save the binding for future use
     await _save_max_channel_binding(state, db_session)
@@ -1450,6 +1468,7 @@ async def _continue_after_max_channel_set(target_message: Message | CallbackQuer
     channel_title = data.get("transfer_tg_channel_title", "Канал")
     channel_username = data.get("transfer_tg_channel_username", "")
     max_channel_id = data.get("transfer_max_channel_id")
+    user_id = data.get("user_id")
 
     # Count posts using Telethon
     try:
@@ -1472,16 +1491,42 @@ async def _continue_after_max_channel_set(target_message: Message | CallbackQuer
         await state.clear()
         return
 
-    total_price = post_count * PRICE_PER_POST
+    # Check free posts for user
+    free_remaining = 0
+    if user_repo and user_id:
+        try:
+            user = await user_repo.get_by_telegram_id(user_id)
+            if user:
+                free_remaining = max(0, 5 - user.free_posts_used)
+        except Exception as e:
+            logger.warning(f"Could not get user free posts info: {e}")
+
+    # Build message based on free posts availability
+    if free_remaining > 0:
+        # User has free posts available
+        message_text = (
+            f"📺 Канал: {channel_title}\n"
+            f"📊 Всего постов: {post_count}\n\n"
+            f"🎁 <b>У вас {free_remaining} бесплатных постов!</b>\n"
+            f"Попробуйте перенос бесплатно, чтобы оценить качество.\n\n"
+            f"💰 После бесплатных: {PRICE_PER_POST}₽ за пост\n\n"
+            f"Выберите сколько постов перенести:"
+        )
+    else:
+        # No free posts remaining - paid only
+        total_price = post_count * PRICE_PER_POST
+        message_text = (
+            f"📺 Канал: {channel_title}\n"
+            f"📊 Всего постов: {post_count}\n"
+            f"💰 Стоимость: {total_price}₽ ({PRICE_PER_POST}₽/пост)\n\n"
+            f"Выберите сколько постов перенести:"
+        )
 
     await _edit_or_send_message(
         target_message,
-        text=f"📺 Канал: {channel_title}\n"
-        f"📊 Всего постов: {post_count}\n"
-        f"💰 Стоимость: {total_price}₽ ({PRICE_PER_POST}₽/пост)\n\n"
-        f"Выберите сколько постов перенести:",
+        text=message_text,
         state=state,
-        reply_markup=select_count_keyboard(post_count),
+        reply_markup=select_count_keyboard(post_count, free_remaining),
     )
 
     await state.set_state(TransferStates.transfer_select_count)
@@ -1534,7 +1579,7 @@ def _parse_max_channel_link(text: str) -> str | None:
 
 
 @transfer_router.message(StateFilter(TransferStates.transfer_waiting_max_channel))
-async def process_transfer_max_channel(message: Message, state, db_session) -> None:
+async def process_transfer_max_channel(message: Message, state, db_session, user_repo) -> None:
     """
     Process Max channel link for transfer.
 
@@ -1569,7 +1614,7 @@ async def process_transfer_max_channel(message: Message, state, db_session) -> N
         
         # Store and continue
         await state.update_data(transfer_max_channel_id=max_channel_id)
-        await _continue_after_max_channel_set(message, state, db_session)
+        await _continue_after_max_channel_set(message, state, db_session, user_repo)
         return
 
     # Try to find channel via API
@@ -1650,7 +1695,7 @@ async def process_transfer_max_channel(message: Message, state, db_session) -> N
     await state.update_data(transfer_max_channel_id=max_channel_id)
     
     # Continue to post counting (save binding for future use)
-    await _continue_after_max_channel_set(message, state, db_session)
+    await _continue_after_max_channel_set(message, state, db_session, user_repo)
 
 
 @transfer_router.callback_query(lambda c: c.data.startswith("transfer_count:"), StateFilter(TransferStates.transfer_select_count))
@@ -1658,6 +1703,7 @@ async def process_post_count_selection(
     callback: CallbackQuery,
     state,
     db_session,
+    user_repo,
 ) -> None:
     """
     Process user's selection of post count and start transfer.
@@ -1666,6 +1712,7 @@ async def process_post_count_selection(
         callback: Callback query with selection
         state: FSM state
         db_session: Database session for duplicate tracking
+        user_repo: User repository for tracking free posts
     """
     action = callback.data.split(":", 1)[1]
     
@@ -1674,7 +1721,7 @@ async def process_post_count_selection(
         # Go back to Max channel selection
         data = await state.get_data()
         channel_title = data.get("transfer_tg_channel_title", "Канал")
-        await _show_max_connection_instructions(callback.message, state, channel_title, db_session)
+        await _show_max_connection_instructions(callback.message, state, channel_title, db_session, user_repo)
         await callback.answer()
         return
     
@@ -1686,6 +1733,40 @@ async def process_post_count_selection(
             reply_markup=back_keyboard(),
         )
         await state.set_state(TransferStates.transfer_select_count)
+        return
+    
+    # Handle free posts selection
+    if action == "free":
+        # Get user to check how many free posts remain
+        data = await state.get_data()
+        user_id = data.get("user_id")
+        
+        if not user_id or not user_repo:
+            await callback.answer("❌ Ошибка: не удалось получить данные пользователя", show_alert=True)
+            return
+        
+        user = await user_repo.get_by_telegram_id(user_id)
+        if not user:
+            await callback.answer("❌ Ошибка: пользователь не найден", show_alert=True)
+            return
+        
+        free_remaining = max(0, 5 - user.free_posts_used)
+        if free_remaining <= 0:
+            await callback.answer("❌ Бесплатные посты уже использованы", show_alert=True)
+            return
+        
+        # Store that we're using free posts and the count
+        await state.update_data(using_free_posts=True, free_posts_count=free_remaining)
+        
+        await callback.answer(f"🎁 Перенос {free_remaining} постов бесплатно")
+        await _execute_transfer(
+            callback.message, 
+            state, 
+            free_remaining, 
+            is_callback=True, 
+            db_session=db_session,
+            user_repo=user_repo,
+        )
         return
 
     # Determine count
@@ -1700,7 +1781,14 @@ async def process_post_count_selection(
         return
 
     await callback.answer()
-    await _execute_transfer(callback.message, state, count, is_callback=True, db_session=db_session)
+    await _execute_transfer(
+        callback.message, 
+        state, 
+        count, 
+        is_callback=True, 
+        db_session=db_session,
+        user_repo=user_repo,
+    )
 
 
 # =============================================================================
@@ -1713,6 +1801,7 @@ async def process_custom_post_count(
     message: Message,
     state,
     db_session,
+    user_repo,
 ) -> None:
     """
     Process custom post count input and start transfer.
@@ -1721,6 +1810,7 @@ async def process_custom_post_count(
         message: User message with number
         state: FSM state
         db_session: Database session for duplicate tracking
+        user_repo: User repository for tracking free posts
     """
     # Delete user message
     await _delete_user_message(message)
@@ -1740,4 +1830,4 @@ async def process_custom_post_count(
         )
         return
 
-    await _execute_transfer(message, state, count, is_callback=False, db_session=db_session)
+    await _execute_transfer(message, state, count, is_callback=False, db_session=db_session, user_repo=user_repo)

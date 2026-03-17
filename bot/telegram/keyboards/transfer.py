@@ -150,17 +150,23 @@ def back_to_start_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def select_count_keyboard(all_count: int) -> InlineKeyboardMarkup:
+def select_count_keyboard(all_count: int, free_remaining: int = 0) -> InlineKeyboardMarkup:
     """
     Create keyboard for selecting number of posts to transfer.
 
     Args:
         all_count: Total number of posts available
+        free_remaining: Number of free posts remaining (0 if none)
 
     Returns:
         Inline keyboard with post count options
     """
     builder = InlineKeyboardBuilder()
+    
+    # Free posts button (if user has free posts remaining)
+    if free_remaining > 0:
+        free_count = min(free_remaining, all_count)
+        builder.button(text=f"🎁 Бесплатно ({free_count} постов)", callback_data="transfer_count:free")
     
     # All posts button
     builder.button(text=f"📄 Все посты ({all_count})", callback_data="transfer_count:all")

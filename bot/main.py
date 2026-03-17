@@ -16,7 +16,40 @@ async def init_db() -> None:
     """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    
+    # Run migrations for new columns
+    await _run_column_migrations()
+    
     print("Database initialized (tables created if not exist)")
+
+
+async def _run_column_migrations() -> None:
+    """
+    Run simple column migrations for SQLite.
+    
+    SQLite doesn't support ALTER TABLE ADD COLUMN with constraints easily,
+    so we use a simple approach: try to add the column, ignore if it exists.
+    """
+    from sqlalchemy import text
+    
+    async with engine.begin() as conn:
+        # Check if free_posts_used column exists in users table
+        try:
+            # SQLite specific: check table info
+            result = await conn.execute(
+                text("SELECT 1 FROM pragma_table_info('users') WHERE name='free_posts_used'")
+            )
+            column_exists = result.scalar() is not None
+            
+            if not column_exists:
+                # Add the column with default 0
+                await conn.execute(
+                    text("ALTER TABLE users ADD COLUMN free_posts_used INTEGER NOT NULL DEFAULT 0")
+                )
+                print("Migration: Added free_posts_used column to users table")
+        except Exception as e:
+            # If anything fails, log it but don't stop the bot
+            print(f"Migration warning (non-critical): {e}")
 
 
 async def main() -> None:
