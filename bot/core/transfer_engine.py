@@ -44,6 +44,8 @@ from telethon.tl.types import (
     DocumentAttributeFilename,
     DocumentAttributeAudio,
     DocumentAttributeVideo,
+    DocumentAttributeAnimated,
+    DocumentAttributeSticker,
 )
 
 from bot.max_api.client import MaxClient, MaxAPIError, RateLimitError
@@ -320,33 +322,104 @@ def detect_media_type(message: Message) -> str:
     return MediaType.UNSUPPORTED
 
 
-def should_skip_message(message: Message) -> tuple[bool, str]:
+def should_skip_message(message: Message, post_index: int = 0) -> tuple[bool, str]:
     """
     Check if a message should be skipped during transfer.
 
     Args:
         message: Telethon Message object
+        post_index: Post ID for logging
 
     Returns:
         Tuple of (should_skip, reason)
     """
+    from telethon.tl.types import (
+        DocumentAttributeAnimated,
+        DocumentAttributeSticker,
+    )
+
+    # === TEXT DETECTION ===
+    # Check all possible text fields
+    has_text = bool(
+        message.text or 
+        message.raw_text or 
+        message.message
+    )
+    text_preview = (message.raw_text or message.text or message.message or "")[:50]
+    
+    # === MEDIA DETECTION (expanded) ===
+    has_media = False
+    media_type = "none"
+    
+    if message.media:
+        if isinstance(message.media, MessageMediaPhoto):
+            has_media = True
+            media_type = "photo"
+        elif isinstance(message.media, MessageMediaDocument):
+            has_media = True
+            doc = message.media.document
+            if doc:
+                # Determine document subtype
+                for attr in doc.attributes:
+                    if isinstance(attr, DocumentAttributeAudio):
+                        if attr.voice:
+                            media_type = "voice"
+                        else:
+                            media_type = "audio"
+                        break
+                    elif isinstance(attr, DocumentAttributeVideo):
+                        if getattr(attr, 'round_message', False):
+                            media_type = "video_note"
+                        else:
+                            media_type = "video"
+                        break
+                    elif isinstance(attr, DocumentAttributeAnimated):
+                        media_type = "gif"
+                        break
+                    elif isinstance(attr, DocumentAttributeSticker):
+                        media_type = "sticker"
+                        break
+                else:
+                    media_type = "document"
+            else:
+                media_type = "document"
+        elif isinstance(message.media, MessageMediaWebPage):
+            # Webpage - not media, but text may exist
+            has_media = False
+            media_type = "webpage"
+        elif isinstance(message.media, MessageMediaContact):
+            has_media = True
+            media_type = "contact"
+        elif isinstance(message.media, MessageMediaPoll):
+            has_media = False  # Skip polls
+            media_type = "poll"
+        else:
+            # Other types (geo, etc.) - treat as media but may be unsupported
+            has_media = True
+            media_type = f"other:{type(message.media).__name__}"
+
+    # === LOGGING: Show what we detected ===
+    logger.info(
+        f"Post {post_index} detection: "
+        f"has_text={has_text}, has_media={has_media}, media_type={media_type}, "
+        f"text_preview='{text_preview}...'"
+    )
+
     # Skip empty messages (no text AND no media)
-    has_text = bool(message.raw_text and message.raw_text.strip())
-    has_media = message.media is not None
     if not has_text and not has_media:
         return True, "empty message (no text, no media)"
     
     # After the check, log media-only posts
     if has_media and not has_text:
-        logger.info(f"Post {message.id}: media-only, will transfer with empty text")
+        logger.info(f"Post {message.id}: media-only {media_type}, will transfer with empty text")
 
     # Skip service messages
     if message.action:
         return True, f"service message: {type(message.action).__name__}"
 
     # Check unsupported media types
-    media_type = detect_media_type(message)
-    if media_type == MediaType.UNSUPPORTED:
+    detected_type = detect_media_type(message)
+    if detected_type == MediaType.UNSUPPORTED:
         if isinstance(message.media, MessageMediaWebPage):
             return True, "link preview"
         return True, f"unsupported media: {type(message.media).__name__}"
@@ -464,6 +537,27 @@ class TransferEngine:
 
                 result.total += 1
 
+                # === DIAGNOSTIC: Log all post details BEFORE skip check ===
+                logger.info(
+                    f"Post {message.id} raw data: "
+                    f"id={message.id}, "
+                    f"text={bool(message.text)}, "
+                    f"raw_text={bool(message.raw_text)}, "
+                    f"message={bool(message.message)}, "
+                    f"media={type(message.media).__name__ if message.media else None}, "
+                    f"document={bool(getattr(message, 'document', None))}, "
+                    f"audio={bool(getattr(message, 'audio', None))}, "
+                    f"voice={bool(getattr(message, 'voice', None))}, "
+                    f"video={bool(getattr(message, 'video', None))}, "
+                    f"photo={bool(message.photo) if hasattr(message, 'photo') else None}, "
+                    f"file={bool(getattr(message, 'file', None))}, "
+                    f"action={type(message.action).__name__ if message.action else None}, "
+                    f"forward={bool(message.forward)}, "
+                    f"grouped_id={message.grouped_id}"
+                )
+                if message.media:
+                    logger.info(f"Post {message.id} media details: {message.media}")
+
                 # Check if post was already transferred (duplicate protection)
                 if self._transferred_repo and self.user_id:
                     max_chat_id_str = str(max_channel_id)
@@ -481,19 +575,10 @@ class TransferEngine:
                         continue
 
                 # Check if we should skip this message
-                should_skip, skip_reason = should_skip_message(message)
+                should_skip, skip_reason = should_skip_message(message, post_index=message.id)
                 if should_skip:
                     result.skipped += 1
-                    has_text = bool(message.raw_text and message.raw_text.strip())
-                    has_media = message.media is not None
-                    media_type = type(message.media).__name__ if message.media else "none"
-                    logger.info(
-                        f"Skipping post {message.id}: "
-                        f"reason={skip_reason}, "
-                        f"has_text={has_text}, "
-                        f"has_media={has_media}, "
-                        f"media_type={media_type}"
-                    )
+                    logger.info(f"Skipping post {message.id}: reason={skip_reason}")
                     await self._notify_progress(
                         progress_callback, result, message.id, skip_reason
                     )
