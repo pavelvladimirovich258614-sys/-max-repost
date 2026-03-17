@@ -545,18 +545,48 @@ async def process_transfer_tg_channel(
     # Store channel username in state
     await state.update_data(transfer_tg_channel_username=channel_username)
 
-    # Try to get chat info
+    # Try to get chat info (Bot API first, then Telethon fallback)
+    chat = None
+    chat_id = None
+    chat_title = None
+    
+    # Step 1: Try Bot API
     try:
         chat = await bot.get_chat(f"@{channel_username}")
+        chat_id = str(chat.id)
+        chat_title = chat.title
+        logger.info(f"Channel @{channel_username} found via Bot API: {chat_title}")
     except Exception as e:
-        logger.error(f"Failed to get chat info: {e}")
+        logger.warning(f"Bot API failed to get chat info for @{channel_username}: {e}")
+    
+    # Step 2: If Bot API failed, try Telethon (for public channels)
+    if chat is None:
+        try:
+            telethon = get_telethon_client(
+                api_id=settings.telegram_api_id,
+                api_hash=settings.telegram_api_hash,
+                phone=settings.telegram_phone,
+            )
+            # Get entity via Telethon
+            from telethon.tl.functions.channels import GetFullChannelRequest
+            entity = await telethon._client.get_entity(channel_username)
+            full = await telethon._client(GetFullChannelRequest(entity))
+            chat_id = str(entity.id)
+            chat_title = entity.title
+            logger.info(f"Channel @{channel_username} found via Telethon: {chat_title}")
+        except Exception as e:
+            logger.error(f"Telethon also failed to get chat info for @{channel_username}: {e}")
+    
+    # Step 3: If both failed, show error
+    if chat_id is None:
         await _edit_or_send_message(
             message,
-            text="❌ Не удалось получить информацию о канале.\n\n"
-            "Убедитесь, что:\n"
-            "• Канал публичный\n"
-            "• Ссылка корректная\n\n"
-            "Попробуйте снова:",
+            text="❌ Канал не найден.\n\n"
+            "Возможные причины:\n"
+            "• Канал приватный (бот работает только с публичными)\n"
+            "• Ссылка введена с ошибкой\n"
+            "• Канал не существует\n\n"
+            "Введите ссылку ещё раз:",
             state=state,
             reply_markup=back_keyboard(),
         )
@@ -564,21 +594,29 @@ async def process_transfer_tg_channel(
 
     # Store chat info
     await state.update_data(
-        transfer_tg_channel_id=str(chat.id),
-        transfer_tg_channel_title=chat.title,
+        transfer_tg_channel_id=chat_id,
+        transfer_tg_channel_title=chat_title,
         transfer_tg_channel_username=channel_username,
     )
 
     # Check if bot is admin (required for accessing channel history)
     bot_user = await bot.me()
-    member = await bot.get_chat_member(chat.id, bot_user.id)
+    
+    # Convert chat_id to int for Bot API (Telethon returns int ID, Bot API expects int)
+    try:
+        chat_id_int = int(chat_id)
+        member = await bot.get_chat_member(chat_id_int, bot_user.id)
+        from aiogram.enums import ChatMemberStatus
+        is_bot_admin = member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+    except Exception as e:
+        logger.warning(f"Could not check bot membership via Bot API: {e}")
+        # If we can't check, assume not admin (safer)
+        is_bot_admin = False
 
-    from aiogram.enums import ChatMemberStatus
-
-    if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+    if not is_bot_admin:
         await _edit_or_send_message(
             message,
-            text=f"<b>📢 Канал найден: {chat.title}</b>\n\n"
+            text=f"<b>📢 Канал найден: {chat_title}</b>\n\n"
             f"Для доступа к постам бота нужно добавить в администраторы.\n\n"
             f"<b>Инструкция:</b>\n"
             f"1. Откройте настройки канала ➡ Администраторы.\n"
@@ -590,7 +628,7 @@ async def process_transfer_tg_channel(
         await state.set_state(TransferStates.transfer_waiting_verification)
     else:
         # Bot is already admin - proceed to ownership verification (check if already verified)
-        await _show_verification_code(message, state, chat.title, db_session, verified_channel_repo)
+        await _show_verification_code(message, state, chat_title, db_session, verified_channel_repo)
 
 
 def _build_continue_keyboard() -> InlineKeyboardMarkup:
@@ -1303,10 +1341,12 @@ async def _execute_transfer(
         error_text = "❌ Ошибка: данные канала утеряны. Начните заново."
         builder = InlineKeyboardBuilder()
         builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
-        if is_callback:
-            await message.edit_text(error_text, reply_markup=builder.as_markup())
-        else:
-            await message.answer(error_text, reply_markup=builder.as_markup())
+        await _edit_or_send_message(
+            message,
+            text=error_text,
+            state=state,
+            reply_markup=builder.as_markup(),
+        )
         await state.clear()
         return
 
@@ -1314,8 +1354,10 @@ async def _execute_transfer(
     if user_id in _active_transfers:
         builder = InlineKeyboardBuilder()
         builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
-        await (message.edit_text if is_callback else message.answer)(
-            "⏳ Перенос уже выполняется, дождитесь завершения",
+        await _edit_or_send_message(
+            message,
+            text="⏳ Перенос уже выполняется, дождитесь завершения",
+            state=state,
             reply_markup=builder.as_markup(),
         )
         return
@@ -1324,8 +1366,10 @@ async def _execute_transfer(
     if _transfer_semaphore.locked():
         builder = InlineKeyboardBuilder()
         builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
-        await (message.edit_text if is_callback else message.answer)(
-            "⏳ Сервер загружен, попробуйте через пару минут",
+        await _edit_or_send_message(
+            message,
+            text="⏳ Сервер загружен, попробуйте через пару минут",
+            state=state,
             reply_markup=builder.as_markup(),
         )
         return
@@ -1352,12 +1396,14 @@ async def _execute_transfer(
         [InlineKeyboardButton(text="❌ Остановить перенос", callback_data="transfer_cancel")]
     ])
     
-    progress_message = await (message.answer if not is_callback else message.edit_text)(
-        f"🚀 <b>Перенос запущен!</b>\n\n"
-        f"📺 Канал: {channel_title}\n"
-        f"📝 Выбрано: {count_text}\n\n"
-        f"⏳ Подготовка...",
-        parse_mode="HTML",
+    # Use _edit_or_send_message to avoid stacking messages
+    progress_message = await _edit_or_send_message(
+        message,
+        text=f"🚀 <b>Перенос запущен!</b>\n\n"
+             f"📺 Канал: {channel_title}\n"
+             f"📝 Выбрано: {count_text}\n\n"
+             f"⏳ Подготовка...",
+        state=state,
         reply_markup=cancel_keyboard,
     )
     
