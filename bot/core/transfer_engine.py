@@ -523,6 +523,10 @@ class TransferEngine:
         """
         result = TransferResult(total=0, success=0, failed=0, skipped=0)
         consecutive_errors = 0
+        
+        # Track progress toward target (initialized here for visibility in final logs)
+        transferred_count = 0
+        junk_scanned = 0  # Safety: count junk messages scanned
 
         try:
             # Get Telethon client
@@ -532,24 +536,50 @@ class TransferEngine:
             if tg_channel.startswith('@'):
                 tg_channel = tg_channel[1:]
 
-            # Determine limit
-            limit = None if count == "all" else int(count)
+            # Determine target count
+            target_count = None if count == "all" else int(count)
+            
+            # For "all" we still need some safety limit
+            iter_limit = None if target_count is None else target_count * 10  # Safety: scan up to 10x
 
             # Fetch messages (oldest first for correct order in Max)
-            logger.info(f"Starting transfer: @{tg_channel} -> {max_channel_id}, count={count}")
+            logger.info(f"Starting transfer: @{tg_channel} -> {max_channel_id}, target={count}")
 
             # Track albums (grouped_id) to avoid duplicate uploads
             processed_group_ids = set()
+            MAX_JUNK_SCAN = 1000  # Safety limit: stop if scanned too much junk
 
             async for message in client.iter_messages(
                 tg_channel,
-                limit=limit,
+                limit=iter_limit,
                 reverse=True,  # Oldest first
             ):
                 if self._abort_flag:
                     logger.info("Transfer aborted by flag")
                     break
+                
+                # Safety check: too much junk scanned
+                if target_count and junk_scanned > MAX_JUNK_SCAN:
+                    logger.warning(f"Safety stop: scanned {junk_scanned} junk messages, stopping")
+                    break
+                
+                # Check if we reached target
+                if target_count and transferred_count >= target_count:
+                    logger.info(f"Reached target of {target_count} posts, stopping")
+                    break
 
+                # === FILTER: Skip junk messages (service, empty) - don't count toward target ===
+                # Quick check without full logging for performance
+                is_junk = (
+                    message.action is not None or  # Service messages
+                    (not message.text and not message.raw_text and not message.media)  # Empty
+                )
+                if is_junk:
+                    junk_scanned += 1
+                    logger.debug(f"Skipping junk message {message.id}: action={message.action is not None}, has_content={bool(message.text or message.raw_text or message.media)}")
+                    continue
+
+                # Now this is a real post - count it
                 result.total += 1
 
                 # === DIAGNOSTIC: Log all post details BEFORE skip check ===
@@ -584,16 +614,20 @@ class TransferEngine:
                     if is_duplicate:
                         result.duplicates += 1
                         logger.info(f"Skipping post {message.id}: reason=already_transferred")
+                        # This counts toward target (user already paid for it)
+                        transferred_count += 1
                         await self._notify_progress(
                             progress_callback, result, message.id, "already_transferred"
                         )
                         continue
 
-                # Check if we should skip this message
+                # Check if we should skip this message (unsupported media, etc.)
                 should_skip, skip_reason = should_skip_message(message, post_index=message.id)
                 if should_skip:
                     result.skipped += 1
                     logger.info(f"Skipping post {message.id}: reason={skip_reason}")
+                    # This counts toward target (we tried but couldn't transfer)
+                    transferred_count += 1
                     await self._notify_progress(
                         progress_callback, result, message.id, skip_reason
                     )
@@ -605,6 +639,7 @@ class TransferEngine:
                     # Already processed as part of an album
                     result.skipped += 1
                     logger.info(f"Skipping post {message.id}: reason=already_processed_in_album")
+                    transferred_count += 1
                     continue
 
                 # Transfer the post
@@ -620,7 +655,8 @@ class TransferEngine:
                         )
                         # Album counts as one transfer operation
                         result.success += 1
-                        logger.info(f"Transferred album {message.grouped_id}")
+                        transferred_count += 1
+                        logger.info(f"Transferred album {message.grouped_id} (progress: {transferred_count}/{target_count if target_count else 'all'})")
                         # Record transfer for duplicate protection
                         if self._transferred_repo and self.user_id:
                             await self._transferred_repo.record_transfer(
@@ -636,7 +672,8 @@ class TransferEngine:
                             max_channel_id,
                         )
                         result.success += 1
-                        logger.info(f"Transferred post {message.id}")
+                        transferred_count += 1
+                        logger.info(f"Transferred post {message.id} (progress: {transferred_count}/{target_count if target_count else 'all'})")
                         # Record transfer for duplicate protection
                         if self._transferred_repo and self.user_id:
                             await self._transferred_repo.record_transfer(
@@ -655,6 +692,7 @@ class TransferEngine:
                 except MaxAPIError as e:
                     consecutive_errors += 1
                     result.failed += 1
+                    transferred_count += 1  # Count toward target (we tried)
                     error = TransferError(
                         post_id=message.id,
                         error_message=str(e),
@@ -682,6 +720,7 @@ class TransferEngine:
                 except Exception as e:
                     consecutive_errors += 1
                     result.failed += 1
+                    transferred_count += 1  # Count toward target (we tried)
                     error = TransferError(
                         post_id=message.id,
                         error_message=str(e),
@@ -701,7 +740,9 @@ class TransferEngine:
 
             logger.info(
                 f"Transfer complete: {result.success} success, "
-                f"{result.failed} failed, {result.skipped} skipped"
+                f"{result.failed} failed, {result.skipped} skipped, "
+                f"{result.duplicates} duplicates, "
+                f"junk_scanned={junk_scanned}"
             )
 
         except Exception as e:
