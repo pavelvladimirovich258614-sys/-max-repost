@@ -487,10 +487,10 @@ def should_skip_message(message: Message, post_index: int = 0) -> tuple[bool, st
                 logger.info(f"Post {post_index}: SKIP - video too large: {size_mb:.1f}MB")
                 return True, f"video too large: {size_mb:.1f}MB"
             
-            # Check audio size limit (100 MB)
-            if is_audio and size_mb > 100:
-                logger.info(f"Post {post_index}: SKIP - audio too large: {size_mb:.1f}MB")
-                return True, f"audio too large: {size_mb:.1f}MB"
+            # Check audio size limit (2 GB = 2048 MB)
+            if is_audio and size_mb > 2048:
+                logger.info(f"Post {post_index}: SKIP - audio too large: {size_mb:.1f}MB (max 2048MB)")
+                return True, f"audio too large: {size_mb:.1f}MB (max 2048MB)"
             
             # Check generic file size limit (50 MB) - only for non-video, non-audio files
             if not is_video and not is_audio and size_mb > 50:
@@ -1045,9 +1045,9 @@ class TransferEngine:
             doc = message.media.document
             if doc and hasattr(doc, 'size') and doc.size:
                 size_mb = doc.size / (1024 * 1024)
-                if size_mb > 100:
-                    logger.warning(f"Audio {message.id} exceeds size limit: {size_mb:.1f}MB > 100MB")
-                    raise MaxAPIError(f"audio too large: {size_mb:.1f}MB (max 100MB)")
+                if size_mb > 2048:
+                    logger.warning(f"Audio {message.id} exceeds size limit: {size_mb:.1f}MB > 2048MB (2GB)")
+                    raise MaxAPIError(f"audio too large: {size_mb:.1f}MB (max 2048MB)")
         
         # STAGE 1 - Downloading
         logger.info(f"Downloading audio {message.id}...")
