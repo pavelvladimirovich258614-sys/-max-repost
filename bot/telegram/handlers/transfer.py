@@ -1193,7 +1193,7 @@ async def _execute_transfer(
 
         # Create keyboard with autopost options
         builder = InlineKeyboardBuilder()
-        builder.button(text="⚡ Подключить автопостинг", callback_data="menu_new_autopost")
+        builder.button(text="⚡ Подключить автопостинг", callback_data="transfer_enable_autopost")
         builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         builder.adjust(1)
 
@@ -1244,6 +1244,76 @@ async def _execute_transfer(
 
     finally:
         await state.clear()
+
+
+@transfer_router.callback_query(lambda c: c.data == "transfer_enable_autopost")
+async def enable_autopost_after_transfer(
+    callback: CallbackQuery,
+    state,
+    autopost_manager,
+) -> None:
+    """
+    Enable autoposting for the channel pair after successful transfer.
+    
+    Uses the channel info from the transfer that was just completed.
+    
+    Args:
+        callback: Callback query
+        state: FSM state (may still have data or be cleared)
+        autopost_manager: AutopostManager instance
+    """
+    # Get data from state (may be cleared, so we need to handle that)
+    data = await state.get_data()
+    user_id = callback.from_user.id
+    tg_channel = data.get("transfer_tg_channel_username")
+    max_channel_id = data.get("transfer_max_channel_id")
+    channel_title = data.get("transfer_tg_channel_title", "Канал")
+    
+    if not tg_channel or not max_channel_id:
+        await callback.message.edit_text(
+            "❌ Данные переноса утеряны. Настройте автопостинг через меню.",
+            reply_markup=back_to_start_keyboard(),
+        )
+        await callback.answer()
+        return
+    
+    # Ensure max_channel_id is int
+    if isinstance(max_channel_id, str) and max_channel_id.lstrip('-').isdigit():
+        max_channel_id = int(max_channel_id)
+    
+    try:
+        # Start autoposting
+        success = await autopost_manager.start_autopost(
+            tg_channel=tg_channel,
+            max_chat_id=max_channel_id,
+            user_id=user_id,
+        )
+        
+        if success:
+            await callback.message.edit_text(
+                f"✅ <b>Автопостинг включён!</b>\n\n"
+                f"📺 Канал: {channel_title}\n\n"
+                f"Новые посты будут автоматически появляться в Max через несколько секунд.",
+                reply_markup=back_to_start_keyboard(),
+            )
+        else:
+            await callback.message.edit_text(
+                f"⚠️ <b>Автопостинг уже активен</b>\n\n"
+                f"📺 Канал: {channel_title}\n\n"
+                f"Автопостинг для этого канала уже работает.",
+                reply_markup=back_to_start_keyboard(),
+            )
+        
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Failed to enable autopost: {e}")
+        await callback.message.edit_text(
+            "❌ Не удалось включить автопостинг.\n\n"
+            "Попробуйте настроить через меню «⚡ Автопостинг».",
+            reply_markup=back_to_start_keyboard(),
+        )
+        await callback.answer()
 
 
 # =============================================================================
@@ -1406,12 +1476,10 @@ async def _continue_after_max_channel_set(target_message: Message | CallbackQuer
 
     await _edit_or_send_message(
         target_message,
-        text=f"<b>🚀 Мастер переноса</b>\n"
-        f"Канал: {channel_title}\n"
-        f"Постов: ~{post_count}\n\n"
-        f"💰 Тариф: {PRICE_PER_POST} руб./пост\n"
-        f"Итого за все: {total_price} руб.\n\n"
-        f"🔢 Сколько постов перенести?",
+        text=f"📺 Канал: {channel_title}\n"
+        f"📊 Всего постов: {post_count}\n"
+        f"💰 Стоимость: {total_price}₽ ({PRICE_PER_POST}₽/пост)\n\n"
+        f"Выберите сколько постов перенести:",
         state=state,
         reply_markup=select_count_keyboard(post_count),
     )
@@ -1585,7 +1653,7 @@ async def process_transfer_max_channel(message: Message, state, db_session) -> N
     await _continue_after_max_channel_set(message, state, db_session)
 
 
-@transfer_router.callback_query(StateFilter(TransferStates.transfer_select_count))
+@transfer_router.callback_query(lambda c: c.data.startswith("transfer_count:"), StateFilter(TransferStates.transfer_select_count))
 async def process_post_count_selection(
     callback: CallbackQuery,
     state,
@@ -1599,16 +1667,19 @@ async def process_post_count_selection(
         state: FSM state
         db_session: Database session for duplicate tracking
     """
-    if callback.data == "transfer_cancel":
-        await state.clear()
-        await callback.message.edit_text(
-            "❌ Перенос отменен.",
-            reply_markup=back_to_start_keyboard(),
-        )
+    action = callback.data.split(":", 1)[1]
+    
+    # Handle back button
+    if action == "back":
+        # Go back to Max channel selection
+        data = await state.get_data()
+        channel_title = data.get("transfer_tg_channel_title", "Канал")
+        await _show_max_connection_instructions(callback.message, state, channel_title, db_session)
         await callback.answer()
         return
-
-    if callback.data == "transfer_count_custom":
+    
+    # Handle custom count input
+    if action == "custom":
         await callback.answer()
         await callback.message.edit_text(
             "🔢 Введите количество постов для переноса:",
@@ -1618,11 +1689,11 @@ async def process_post_count_selection(
         return
 
     # Determine count
-    if callback.data == "transfer_count_all":
+    if action == "all":
         count = "all"
-    elif callback.data == "transfer_count_100":
+    elif action == "100":
         count = 100
-    elif callback.data == "transfer_count_50":
+    elif action == "50":
         count = 50
     else:
         await callback.answer("Неизвестный выбор", show_alert=True)

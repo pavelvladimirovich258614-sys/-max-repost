@@ -283,3 +283,76 @@ async def cancel_autopost(callback: CallbackQuery, state) -> None:
         reply_markup=back_to_menu_keyboard(),
     )
     await callback.answer()
+
+
+@autopost_router.callback_query(lambda c: c.data == "menu_manage_autopost")
+async def show_autopost_management(callback: CallbackQuery, autopost_manager) -> None:
+    """
+    Show autopost management menu.
+    
+    Displays active autopostings for the user with options to enable/disable.
+    
+    Args:
+        callback: Callback query
+        autopost_manager: AutopostManager instance
+    """
+    user_id = callback.from_user.id
+    
+    # Get user's active autoposts
+    active_channels = autopost_manager.get_user_active_channels(user_id)
+    
+    if active_channels:
+        text = (
+            "<b>⚡ Автопостинг</b>\n\n"
+            "Активные автопостинги:\n"
+        )
+        
+        builder = InlineKeyboardBuilder()
+        for ch in active_channels:
+            tg_ch = ch["tg_channel"]
+            max_ch = ch["max_chat_id"]
+            display_name = tg_ch[:25] + "..." if len(tg_ch) > 25 else tg_ch
+            builder.button(
+                text=f"⏹ Остановить @{display_name}",
+                callback_data=f"autopost_stop:{tg_ch}",
+            )
+        
+        builder.button(text="➕ Добавить новый", callback_data="menu_new_autopost")
+        builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+        builder.adjust(1)
+    else:
+        text = (
+            "<b>⚡ Автопостинг</b>\n\n"
+            "У вас нет активных автопостингов.\n\n"
+            "Настройте автопостинг, чтобы новые посты из Telegram автоматически появлялись в Max."
+        )
+        
+        builder = InlineKeyboardBuilder()
+        builder.button(text="➕ Настроить автопостинг", callback_data="menu_new_autopost")
+        builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+        builder.adjust(1)
+    
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@autopost_router.callback_query(lambda c: c.data.startswith("autopost_stop:"))
+async def stop_autopost_handler(callback: CallbackQuery, autopost_manager) -> None:
+    """
+    Stop autoposting for a specific channel.
+    
+    Args:
+        callback: Callback query
+        autopost_manager: AutopostManager instance
+    """
+    tg_channel = callback.data.split(":", 1)[1]
+    
+    success = await autopost_manager.stop_autopost(tg_channel)
+    
+    if success:
+        await callback.answer(f"✅ Автопостинг для @{tg_channel} остановлен")
+    else:
+        await callback.answer(f"⚠️ Автопостинг для @{tg_channel} не был активен")
+    
+    # Refresh the menu
+    await show_autopost_management(callback, autopost_manager)

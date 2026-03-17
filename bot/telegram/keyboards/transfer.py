@@ -150,25 +150,31 @@ def back_to_start_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def select_count_keyboard(all_count: int, has_all: bool = True) -> InlineKeyboardMarkup:
+def select_count_keyboard(all_count: int) -> InlineKeyboardMarkup:
     """
     Create keyboard for selecting number of posts to transfer.
 
     Args:
         all_count: Total number of posts available
-        has_all: Whether to show "All" button (for large counts)
 
     Returns:
         Inline keyboard with post count options
     """
     builder = InlineKeyboardBuilder()
-
-    if has_all and all_count > 100:
-        builder.button(text=f"📄 Все ({all_count} шт.)", callback_data="transfer_count_all")
-    builder.button(text="📄 Последние 100", callback_data="transfer_count_100")
-    builder.button(text="📄 Последние 50", callback_data="transfer_count_50")
-    builder.button(text="✏️ Своё количество", callback_data="transfer_count_custom")
-    builder.button(text="↩️ Назад", callback_data="transfer_cancel")
+    
+    # All posts button
+    builder.button(text=f"📄 Все посты ({all_count})", callback_data="transfer_count:all")
+    
+    # Last 100 (show only if more than 100 posts)
+    if all_count > 100:
+        builder.button(text="📄 Последние 100", callback_data="transfer_count:100")
+    
+    # Last 50 (show only if more than 50 posts)
+    if all_count > 50:
+        builder.button(text="📄 Последние 50", callback_data="transfer_count:50")
+    
+    builder.button(text="✏️ Своё количество", callback_data="transfer_count:custom")
+    builder.button(text="↩️ Назад", callback_data="transfer_count:back")
 
     builder.adjust(1)
     return builder.as_markup()

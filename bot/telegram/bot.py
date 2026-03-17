@@ -7,6 +7,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config.settings import settings
 from bot.telegram.middlewares.db import DBMiddleware
+from bot.core.autopost import AutopostManager
+from bot.core.telethon_client import get_telethon_client
+from bot.max_api.client import MaxClient
 
 # Import all routers
 from bot.telegram.handlers.start import start_router
@@ -56,9 +59,22 @@ def setup_dispatcher(bot: Bot) -> Dispatcher:
     # Setup lifecycle handlers
     @dp.startup()
     async def on_startup() -> None:
-        """Log bot startup."""
+        """Log bot startup and initialize autopost manager."""
         bot_user = await bot.get_me()
         print(f"Bot started: @{bot_user.username} (ID: {bot_user.id})")
+        
+        # Initialize AutopostManager
+        telethon = get_telethon_client(
+            api_id=settings.telegram_api_id,
+            api_hash=settings.telegram_api_hash,
+            phone=settings.telegram_phone,
+        )
+        max_client = MaxClient()
+        autopost_manager = AutopostManager(telethon, max_client)
+        
+        # Store in dispatcher workflow_data for access in handlers
+        dp.workflow_data["autopost_manager"] = autopost_manager
+        print("Autopost manager initialized")
 
     @dp.shutdown()
     async def on_shutdown() -> None:
