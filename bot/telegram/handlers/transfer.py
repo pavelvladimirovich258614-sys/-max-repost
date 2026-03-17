@@ -34,6 +34,95 @@ from config.settings import settings
 # =============================================================================
 
 
+async def _delete_user_message(message: Message) -> None:
+    """Delete user message (ignore errors if no permission)."""
+    try:
+        await message.delete()
+    except Exception:
+        pass  # Bot may not have delete permission
+
+
+async def _edit_or_send_message(
+    target_message: Message | CallbackQuery,
+    text: str,
+    state,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    parse_mode: str = "HTML",
+) -> Message:
+    """
+    Edit existing bot message or send new one.
+    
+    Stores message_id in state for future edits.
+    
+    Args:
+        target_message: Message or CallbackQuery to respond to
+        state: FSM state
+        text: Text to send
+        reply_markup: Optional keyboard
+        parse_mode: Parse mode for text
+        
+    Returns:
+        Sent or edited message
+    """
+    data = await state.get_data()
+    bot_msg_id = data.get("bot_message_id")
+    chat_id = data.get("chat_id")
+    
+    # Try to edit existing message
+    if bot_msg_id and chat_id:
+        try:
+            from bot.telegram.bot import bot
+            edited = await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=bot_msg_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+            )
+            return edited
+        except Exception:
+            pass  # Fall through to send new message
+    
+    # Try to edit callback message if it's a CallbackQuery
+    if isinstance(target_message, CallbackQuery):
+        try:
+            edited = await target_message.message.edit_text(
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+            )
+            # Store message_id for future edits
+            await state.update_data(bot_message_id=edited.message_id, chat_id=edited.chat.id)
+            return edited
+        except Exception:
+            # Fall through to send new message
+            target_message = target_message.message
+    
+    # Send new message
+    try:
+        sent = await target_message.answer(
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
+        # Store message_id for future edits
+        await state.update_data(bot_message_id=sent.message_id, chat_id=sent.chat.id)
+        return sent
+    except Exception:
+        # Fallback: try to answer on message directly
+        if hasattr(target_message, 'chat'):
+            from bot.telegram.bot import bot
+            sent = await bot.send_message(
+                chat_id=target_message.chat.id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+            )
+            await state.update_data(bot_message_id=sent.message_id, chat_id=sent.chat.id)
+            return sent
+        raise
+
+
 def _strip_html(text: str, max_length: int = 200) -> str:
     """
     Remove HTML tags from text and truncate.
@@ -86,8 +175,12 @@ async def start_transfer_setup(callback: CallbackQuery, state) -> None:
         callback: Callback query
         state: FSM state
     """
-    # Store user_id in state for later use
-    await state.update_data(user_id=callback.from_user.id)
+    # Store user_id and chat_id in state for later use
+    await state.update_data(
+        user_id=callback.from_user.id,
+        chat_id=callback.message.chat.id,
+        bot_message_id=callback.message.message_id,
+    )
     
     await callback.message.edit_text(
         "<b>🔗 Пришлите ссылку на ваш Telegram-канал</b>\n\n"
@@ -118,6 +211,9 @@ async def process_transfer_tg_channel(message: Message, state, bot) -> None:
         state: FSM state
         bot: Bot instance for API calls
     """
+    # Delete user message
+    await _delete_user_message(message)
+    
     text = message.text.strip()
     channel_username = None
 
@@ -132,20 +228,32 @@ async def process_transfer_tg_channel(message: Message, state, bot) -> None:
         channel_username = text.strip("/@")
 
     if not channel_username:
-        await message.answer(
+        await _edit_or_send_message(
+            message, state,
             "❌ Не удалось распознать ссылку на канал.\n\n"
             "Отправьте ссылку в формате:\n"
             "<i>https://t.me/channelname</i> или <i>@channelname</i>",
-            parse_mode="HTML",
         )
         return
 
     # Store channel username in state
     await state.update_data(transfer_tg_channel_username=channel_username)
 
-    # TEMP: Let exceptions propagate to see full traceback
     # Try to get chat info
-    chat = await bot.get_chat(f"@{channel_username}")
+    try:
+        chat = await bot.get_chat(f"@{channel_username}")
+    except Exception as e:
+        logger.error(f"Failed to get chat info: {e}")
+        await _edit_or_send_message(
+            message, state,
+            "❌ Не удалось получить информацию о канале.\n\n"
+            "Убедитесь, что:\n"
+            "• Канал публичный\n"
+            "• Ссылка корректная\n\n"
+            "Попробуйте снова:",
+            reply_markup=back_keyboard(),
+        )
+        return
 
     # Store chat info
     await state.update_data(
@@ -161,14 +269,14 @@ async def process_transfer_tg_channel(message: Message, state, bot) -> None:
     from aiogram.enums import ChatMemberStatus
 
     if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
-        await message.answer(
+        await _edit_or_send_message(
+            message, state,
             f"<b>📢 Канал найден: {chat.title}</b>\n\n"
             f"Для доступа к постам бота нужно добавить в администраторы.\n\n"
             f"<b>Инструкция:</b>\n"
             f"1. Откройте настройки канала ➡ Администраторы.\n"
             f"2. Добавьте @{TG_BOT_USERNAME} как администратора.\n"
             f"3. Сохраните изменения и нажмите «Продолжить».",
-            parse_mode="HTML",
             reply_markup=_build_continue_keyboard(),
         )
         await state.set_state(TransferStates.transfer_waiting_verification)
@@ -228,7 +336,7 @@ async def verify_admin_after_prompt(callback: CallbackQuery, state, bot) -> None
 
 
 async def _show_max_connection_instructions(
-    message: Message,
+    target_message: Message | CallbackQuery,
     state,
     channel_title: str,
     db_session=None,
@@ -240,7 +348,7 @@ async def _show_max_connection_instructions(
     shows them for quick selection. Otherwise shows connection instructions.
 
     Args:
-        message: Message to edit or send
+        target_message: Message or CallbackQuery to edit
         state: FSM state
         channel_title: Telegram channel title
         db_session: Optional database session
@@ -278,10 +386,11 @@ async def _show_max_connection_instructions(
         
         keyboard = saved_max_channels_keyboard(saved_bindings, show_delete=True)
         
-        if isinstance(message, CallbackQuery):
-            await message.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
-        else:
-            await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+        await _edit_or_send_message(
+            target_message, state,
+            text=text,
+            reply_markup=keyboard,
+        )
         
         await state.set_state(TransferStates.transfer_select_saved_max)
     else:
@@ -296,14 +405,15 @@ async def _show_max_connection_instructions(
             f"4. Добавьте администратора «Репост» ({MAX_BOT_USERNAME})\n"
             f"5. Включите <b>«Писать посты»</b> и сохраните\n\n"
             f"➡ <b>Вернитесь сюда и отправьте ссылку на канал в MAX</b>\n"
-            f"<i>https://max.me/username или ID канала</i>\n\n"
+            f"<i>https://max.me/username, https://max.ru/join/..., или ID канала</i>\n\n"
             f"⚠️ Если Max не находит бота по нику — попробуйте найти по названию «Репост»"
         )
 
-        if isinstance(message, CallbackQuery):
-            await message.message.edit_text(text, parse_mode="HTML")
-        else:
-            await message.answer(text, parse_mode="HTML", reply_markup=back_keyboard())
+        await _edit_or_send_message(
+            target_message, state,
+            text=text,
+            reply_markup=back_keyboard(),
+        )
 
         await state.set_state(TransferStates.transfer_waiting_max_channel)
 
@@ -837,28 +947,31 @@ async def process_manual_chat_id(message: Message, state, db_session) -> None:
         state: FSM state
         db_session: Database session
     """
+    # Delete user message
+    await _delete_user_message(message)
+    
     text = message.text.strip()
     
     # Validate: should be a negative integer (Max channel IDs are negative)
     try:
         chat_id = int(text)
         if chat_id >= 0:
-            await message.answer(
+            await _edit_or_send_message(
+                message, state,
                 "❌ <b>Некорректный chat_id</b>\n\n"
                 "ID канала в Max должен быть <b>отрицательным числом</b>.\n"
                 "Пример: <code>-70977371223467</code>\n\n"
                 "Попробуйте снова:",
-                parse_mode="HTML",
                 reply_markup=back_keyboard(),
             )
             return
     except ValueError:
-        await message.answer(
+        await _edit_or_send_message(
+            message, state,
             "❌ <b>Некорректный формат</b>\n\n"
             "Введите числовой ID (только цифры со знаком минус).\n"
             "Пример: <code>-70977371223467</code>\n\n"
             "Попробуйте снова:",
-            parse_mode="HTML",
             reply_markup=back_keyboard(),
         )
         return
@@ -907,7 +1020,7 @@ async def _save_max_channel_binding(state, db_session=None) -> None:
         logger.error(f"Failed to save Max channel binding: {e}")
 
 
-async def _continue_after_max_channel_set(message: Message, state, db_session=None) -> None:
+async def _continue_after_max_channel_set(target_message: Message | CallbackQuery, state, db_session=None) -> None:
     """Continue flow after max_channel_id is set (either from API or manual entry)."""
     # Save the binding for future use
     await _save_max_channel_binding(state, db_session)
@@ -928,7 +1041,8 @@ async def _continue_after_max_channel_set(message: Message, state, db_session=No
         post_count = await telethon.count_channel_posts(channel_username)
     except Exception as e:
         logger.error(f"Error counting posts: {e}")
-        await message.answer(
+        await _edit_or_send_message(
+            target_message, state,
             "❌ Не удалось подсчитать посты в канале.\n\n"
             f"Ошибка: {str(e)}\n\n"
             "Убедитесь, что канал публичный и бот имеет к нему доступ.",
@@ -939,18 +1053,64 @@ async def _continue_after_max_channel_set(message: Message, state, db_session=No
 
     total_price = post_count * PRICE_PER_POST
 
-    await message.answer(
+    await _edit_or_send_message(
+        target_message, state,
         f"<b>🚀 Мастер переноса</b>\n"
         f"Канал: {channel_title}\n"
         f"Постов: ~{post_count}\n\n"
         f"💰 Тариф: {PRICE_PER_POST} руб./пост\n"
         f"Итого за все: {total_price} руб.\n\n"
         f"🔢 Сколько постов перенести?",
-        parse_mode="HTML",
         reply_markup=select_count_keyboard(post_count),
     )
 
     await state.set_state(TransferStates.transfer_select_count)
+
+
+def _parse_max_channel_link(text: str) -> str | None:
+    """
+    Parse Max channel link or ID from user input.
+    
+    Supports formats:
+    - https://max.me/username
+    - https://max.me/join/...
+    - https://max.ru/username
+    - https://max.ru/join/...
+    - @username
+    - -123456789 (numeric chat_id)
+    
+    Args:
+        text: User input text
+        
+    Returns:
+        Parsed identifier or None if invalid
+    """
+    text = text.strip()
+    
+    # Try to parse as numeric ID first
+    if text.lstrip('-').isdigit():
+        return text
+    
+    # Handle URLs
+    if text.startswith("http://") or text.startswith("https://"):
+        # Remove protocol and split
+        url_part = text.split("://", 1)[-1]
+        parts = url_part.split("/")
+        
+        # Check for max domains
+        if parts[0] in ("max.me", "max.ru", "www.max.me", "www.max.ru"):
+            # Get the last non-empty part
+            for part in reversed(parts[1:]):
+                if part:
+                    return part
+            return None
+    
+    # Handle @username
+    if text.startswith("@"):
+        return text[1:]
+    
+    # Return as-is (might be a username or ID)
+    return text
 
 
 @transfer_router.message(StateFilter(TransferStates.transfer_waiting_max_channel))
@@ -963,25 +1123,35 @@ async def process_transfer_max_channel(message: Message, state, db_session) -> N
         state: FSM state
         db_session: Database session
     """
+    # Delete user message
+    await _delete_user_message(message)
+    
     text = message.text.strip()
-
-    # Parse Max channel link to get potential name/identifier
-    if "max.me/" in text or "max.ru/" in text:
-        parts = text.split("/")[-1].strip()
-        max_channel_identifier = parts
-    elif text.startswith("@"):
-        max_channel_identifier = text[1:]
-    else:
-        max_channel_identifier = text.strip()
+    max_channel_identifier = _parse_max_channel_link(text)
 
     if not max_channel_identifier:
-        await message.answer(
+        await _edit_or_send_message(
+            message, state,
             "❌ Не удалось распознать ссылку на канал MAX.\n\n"
-            "Отправьте ссылку или ID канала.",
+            "Отправьте:\n"
+            "• Ссылку на канал: <i>https://max.me/username</i> или <i>https://max.ru/join/...</i>\n"
+            "• Или числовой ID: <i>-123456789</i>",
+            reply_markup=back_keyboard(),
         )
         return
 
-    # Get chats list and find channel by numeric chat_id
+    # Check if it's a numeric chat_id (negative number for channels)
+    if max_channel_identifier.lstrip('-').isdigit():
+        # Direct numeric ID - use it
+        max_channel_id = int(max_channel_identifier)
+        logger.info(f"Using numeric Max chat_id: {max_channel_id}")
+        
+        # Store and continue
+        await state.update_data(transfer_max_channel_id=max_channel_id)
+        await _continue_after_max_channel_set(message, state, db_session)
+        return
+
+    # Try to find channel via API
     max_channel_id = None
     try:
         async with MaxClient() as client:
@@ -991,22 +1161,21 @@ async def process_transfer_max_channel(message: Message, state, db_session) -> N
             # Check if bot has access to any chats
             if not chats:
                 # Max API doesn't return channels in /chats - show auto-detect options
-                await message.answer(
+                await _edit_or_send_message(
+                    message, state,
                     "🔍 <b>Определяю ID канала...</b>\n\n"
                     "Убедитесь что бот добавлен в канал Max как администратор "
                     "с правом <b>'Писать посты'</b>.",
-                    parse_mode="HTML",
                     reply_markup=detect_channel_keyboard(),
                 )
                 await state.set_state(TransferStates.transfer_detect_max_channel)
                 return
 
             # Find channel by name/username matching the identifier from link
+            identifier_lower = max_channel_identifier.lower()
             for chat in chats:
-                # Check if identifier matches chat name or username
                 chat_name_lower = (chat.name or "").lower()
                 chat_username_lower = (chat.username or "").lower()
-                identifier_lower = max_channel_identifier.lower()
 
                 if (identifier_lower in chat_name_lower or
                     chat_name_lower in identifier_lower or
@@ -1023,7 +1192,8 @@ async def process_transfer_max_channel(message: Message, state, db_session) -> N
 
     except MaxAPIError as e:
         logger.error(f"Max API error: {e}")
-        await message.answer(
+        await _edit_or_send_message(
+            message, state,
             "❌ Ошибка подключения к Max API.\n\n"
             "Убедитесь, что:\n"
             f"• Бот «Репост» ({MAX_BOT_USERNAME}) добавлен в канал\n"
@@ -1035,17 +1205,18 @@ async def process_transfer_max_channel(message: Message, state, db_session) -> N
 
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
-        await message.answer(
+        await _edit_or_send_message(
+            message, state,
             "❌ Произошла ошибка. Попробуйте позже.",
             reply_markup=back_keyboard(),
         )
         return
 
     if not max_channel_id:
-        await message.answer(
+        await _edit_or_send_message(
+            message, state,
             "❌ <b>Не удалось определить канал</b>\n\n"
             "Попробуйте ввести chat_id вручную:",
-            parse_mode="HTML",
             reply_markup=_build_manual_chat_id_keyboard(),
         )
         return
@@ -1055,44 +1226,6 @@ async def process_transfer_max_channel(message: Message, state, db_session) -> N
     
     # Continue to post counting (save binding for future use)
     await _continue_after_max_channel_set(message, state, db_session)
-
-    # Get channel info
-    data = await state.get_data()
-    channel_title = data.get("transfer_tg_channel_title", "Канал")
-    channel_username = data.get("transfer_tg_channel_username", "")
-
-    # Count posts using Telethon (real count, not placeholder)
-    try:
-        telethon = get_telethon_client(
-            api_id=settings.telegram_api_id,
-            api_hash=settings.telegram_api_hash,
-            phone=settings.telegram_phone,
-        )
-        post_count = await telethon.count_channel_posts(channel_username)
-    except Exception as e:
-        logger.error(f"Error counting posts: {e}")
-        await message.answer(
-            "❌ Не удалось подсчитать посты в канале.\n\n"
-            f"Ошибка: {str(e)}\n\n"
-            "Убедитесь, что канал публичный и бот имеет к нему доступ.",
-            reply_markup=back_keyboard(),
-        )
-        return
-
-    total_price = post_count * PRICE_PER_POST
-
-    await message.answer(
-        f"<b>🚀 Мастер переноса</b>\n"
-        f"Канал: {channel_title}\n"
-        f"Постов: ~{post_count}\n\n"
-        f"💰 Тариф: {PRICE_PER_POST} руб./пост\n"
-        f"Итого за все: {total_price} руб.\n\n"
-        f"🔢 Сколько постов перенести?",
-        parse_mode="HTML",
-        reply_markup=select_count_keyboard(post_count),
-    )
-
-    await state.set_state(TransferStates.transfer_select_count)
 
 
 @transfer_router.callback_query(StateFilter(TransferStates.transfer_select_count))
@@ -1151,6 +1284,9 @@ async def process_custom_post_count(message: Message, state) -> None:
         message: User message with number
         state: FSM state
     """
+    # Delete user message
+    await _delete_user_message(message)
+    
     text = message.text.strip()
 
     try:
@@ -1158,13 +1294,11 @@ async def process_custom_post_count(message: Message, state) -> None:
         if count <= 0:
             raise ValueError()
     except ValueError:
-        await message.answer(
+        await _edit_or_send_message(
+            message, state,
             "❌ Введите корректное число (больше 0).",
             reply_markup=back_keyboard(),
         )
         return
 
     await _execute_transfer(message, state, count, is_callback=False)
-
-
-# No additional imports needed
