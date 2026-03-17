@@ -467,7 +467,7 @@ class MaxClient:
         chat_id: str | int,
         text: str,
         attachments: list[dict] | None = None,
-        markup: list[dict] | None = None,
+        format: str | None = None,
     ) -> SendMessageResponse:
         """
         Send a message to a chat.
@@ -477,8 +477,7 @@ class MaxClient:
             text: Message text (max 4000 chars)
             attachments: List of attachment objects in format:
                          [{"type": "image", "payload": {"token": "..."}}, ...]
-            markup: List of markup objects for text formatting:
-                    [{"type": "strong", "from": 0, "length": 5}, ...]
+            format: Text format ("html" or None for plain text)
 
         Returns:
             SendMessageResponse with sent message info
@@ -499,8 +498,8 @@ class MaxClient:
         if attachments:
             payload["attachments"] = attachments
 
-        if markup:
-            payload["markup"] = markup
+        if format:
+            payload["format"] = format
 
         # Retry logic for attachment.not.ready errors
         max_retries = 3

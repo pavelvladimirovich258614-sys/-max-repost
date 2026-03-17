@@ -9,6 +9,7 @@ This module handles the complete transfer workflow:
 """
 
 import asyncio
+import html
 import io
 import tempfile
 from dataclasses import dataclass, field
@@ -48,80 +49,142 @@ from telethon.tl.types import (
 from bot.max_api.client import MaxClient, MaxAPIError, RateLimitError
 
 
-# =============================================================================
-# Markup Conversion (Max API format)
-# =============================================================================
-
-def entities_to_max_markup(entities: list) -> list[dict]:
+def split_text(text: str, max_length: int = 4000) -> list[str]:
     """
-    Convert Telegram entities to Max API markup format.
+    Split text into chunks of max_length characters.
     
-    Max API uses markup array with offset/length instead of markdown symbols.
-    This avoids text corruption from overlapping entities.
+    Tries to split at newlines first, then at spaces, then hard split.
     
     Args:
-        entities: List of Telegram message entities from Telethon
+        text: Text to split
+        max_length: Maximum length of each chunk
         
     Returns:
-        List of Max markup objects: [{"type": "strong", "from": 0, "length": 5}, ...]
+        List of text chunks
+    """
+    if len(text) <= max_length:
+        return [text]
+    
+    chunks = []
+    remaining = text
+    
+    while remaining:
+        if len(remaining) <= max_length:
+            chunks.append(remaining)
+            break
+        
+        # Try to find a newline to split at
+        split_pos = remaining.rfind('\n', 0, max_length + 1)
+        
+        # If no newline, try to find a space
+        if split_pos == -1:
+            split_pos = remaining.rfind(' ', 0, max_length + 1)
+        
+        # If no space either, hard split at max_length
+        if split_pos == -1 or split_pos == 0:
+            split_pos = max_length
+        
+        chunks.append(remaining[:split_pos])
+        remaining = remaining[split_pos:].lstrip()
+    
+    return chunks
+
+
+# =============================================================================
+# HTML Conversion (Max API format)
+# =============================================================================
+
+def convert_entities_to_html(raw_text: str, entities: list) -> str:
+    """
+    Convert Telegram entities to HTML for Max API.
+    
+    Telethon entities use UTF-16 offset/length. This function handles
+    Unicode (emojis) correctly by working with UTF-16 encoded text.
+    
+    Args:
+        raw_text: Clean text without markdown (message.raw_text)
+        entities: List of Telegram message entities
+        
+    Returns:
+        HTML-formatted text for Max API
     """
     if not entities:
-        return []
+        return html.escape(raw_text)
     
-    markup = []
-    for entity in entities:
-        item = {"from": entity.offset, "length": entity.length}
+    # Sort entities by offset (reverse order for insertion)
+    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
+    
+    # Work with UTF-16 encoding for correct emoji handling
+    # Telethon uses UTF-16 code units for offset/length
+    text_utf16 = raw_text.encode('utf-16-le')
+    result = raw_text
+    
+    for entity in sorted_entities:
+        offset = entity.offset
+        length = entity.length
+        
+        # Convert UTF-16 offset/length to Python string indices
+        # This handles emojis correctly (emojis are 2 UTF-16 code units)
+        prefix = text_utf16[:offset * 2].decode('utf-16-le', errors='replace')
+        entity_text = text_utf16[offset * 2:(offset + length) * 2].decode('utf-16-le', errors='replace')
+        
+        # Escape HTML in entity text
+        entity_text_escaped = html.escape(entity_text)
+        
+        # Determine HTML tag
+        tag = None
+        close_tag = None
         
         if isinstance(entity, MessageEntityBold):
-            item["type"] = "strong"
+            tag, close_tag = "<b>", "</b>"
         elif isinstance(entity, MessageEntityItalic):
-            item["type"] = "emphasized"
+            tag, close_tag = "<i>", "</i>"
         elif isinstance(entity, MessageEntityCode):
-            item["type"] = "monospaced"
+            tag, close_tag = "<code>", "</code>"
         elif isinstance(entity, MessageEntityPre):
-            item["type"] = "monospaced"
+            tag, close_tag = "<pre>", "</pre>"
         elif isinstance(entity, MessageEntityTextUrl):
-            item["type"] = "link"
-            item["url"] = entity.url
+            url = html.escape(entity.url)
+            tag = f'<a href="{url}">'
+            close_tag = "</a>"
         elif isinstance(entity, MessageEntityUrl):
-            item["type"] = "link"
-            # URL is the text itself, extracted at send time
-            item["url"] = None  # Will be filled from text
+            # Max auto-links URLs, no tag needed
+            continue
         elif isinstance(entity, MessageEntityStrike):
-            item["type"] = "strikethrough"
+            tag, close_tag = "<s>", "</s>"
         elif isinstance(entity, MessageEntityUnderline):
-            # Max doesn't have underline, use emphasized as fallback
-            item["type"] = "emphasized"
+            tag, close_tag = "<u>", "</u>"
         else:
             # Unknown entity type - skip
             continue
         
-        markup.append(item)
-    
-    # Fill in URLs for MessageEntityUrl type
-    # This needs to be done after we have the text
-    return markup
-
-
-def finalize_markup(text: str, markup: list[dict]) -> list[dict]:
-    """
-    Finalize markup by filling in URL values for MessageEntityUrl types.
-    
-    Args:
-        text: The message text
-        markup: Partially built markup array
+        # Replace the entity text with HTML-wrapped version
+        # Find position in current result string
+        result_prefix = result[:len(prefix)]
+        result_suffix = result[len(prefix) + len(entity_text):]
         
-    Returns:
-        Final markup array with all URLs filled in
-    """
-    result = []
-    for item in markup:
-        if item.get("url") is None and item.get("type") == "link":
-            # This was a MessageEntityUrl, extract URL from text
-            start = item["from"]
-            length = item["length"]
-            item["url"] = text[start:start + length]
-        result.append(item)
+        # Verify we're replacing the right text
+        if result[len(prefix):len(prefix) + len(entity_text)] == entity_text:
+            result = result_prefix + tag + entity_text_escaped + close_tag + result_suffix
+        else:
+            # Fallback: text might have changed due to previous replacements
+            # Try to find and replace exact match
+            search_start = max(0, len(prefix) - 10)
+            search_end = min(len(result), len(prefix) + len(entity_text) + 10)
+            search_area = result[search_start:search_end]
+            
+            if entity_text in search_area:
+                idx = search_area.index(entity_text)
+                actual_pos = search_start + idx
+                result = (
+                    result[:actual_pos] + 
+                    tag + entity_text_escaped + close_tag + 
+                    result[actual_pos + len(entity_text):]
+                )
+    
+    # Escape any remaining HTML in text outside entities
+    # We need to re-escape but preserve our inserted tags
+    # Simple approach: split by our tags, escape non-tag parts
     return result
 
 
@@ -262,20 +325,26 @@ def should_skip_message(message: Message) -> tuple[bool, str]:
     Returns:
         Tuple of (should_skip, reason)
     """
-    # Skip empty messages
-    if not message.text and not message.media:
-        return True, "empty message"
+    # Skip empty messages (no text AND no media)
+    has_text = bool(message.raw_text and message.raw_text.strip())
+    has_media = message.media is not None
+    if not has_text and not has_media:
+        return True, "empty message (no text, no media)"
+    
+    # After the check, log media-only posts
+    if has_media and not has_text:
+        logger.info(f"Post {message.id}: media-only, will transfer with empty text")
 
     # Skip service messages
     if message.action:
-        return True, "service message"
+        return True, f"service message: {type(message.action).__name__}"
 
     # Check unsupported media types
     media_type = detect_media_type(message)
     if media_type == MediaType.UNSUPPORTED:
         if isinstance(message.media, MessageMediaWebPage):
             return True, "link preview"
-        return True, f"unsupported media type: {type(message.media).__name__}"
+        return True, f"unsupported media: {type(message.media).__name__}"
 
     return False, ""
 
@@ -380,7 +449,16 @@ class TransferEngine:
                 should_skip, skip_reason = should_skip_message(message)
                 if should_skip:
                     result.skipped += 1
-                    logger.info(f"Skipping post {message.id}: reason={skip_reason}, text_preview='{(message.text or '')[:50]}...'")
+                    has_text = bool(message.raw_text and message.raw_text.strip())
+                    has_media = message.media is not None
+                    media_type = type(message.media).__name__ if message.media else "none"
+                    logger.info(
+                        f"Skipping post {message.id}: "
+                        f"reason={skip_reason}, "
+                        f"has_text={has_text}, "
+                        f"has_media={has_media}, "
+                        f"media_type={media_type}"
+                    )
                     await self._notify_progress(
                         progress_callback, result, message.id, skip_reason
                     )
@@ -493,64 +571,69 @@ class TransferEngine:
     ) -> None:
         """
         Transfer a single post (not part of an album).
-
-        Args:
-            message: Telethon Message object
-            max_channel_id: Max channel ID
-
-        Raises:
-            MaxAPIError: If posting fails
         """
         media_type = detect_media_type(message)
-        text = message.text or ""
+        raw_text = message.raw_text or ""
         
-        # Convert Telegram entities to Max markup format
-        markup = None
+        # Convert entities to HTML for Max API
         if message.entities:
-            raw_markup = entities_to_max_markup(message.entities)
-            markup = finalize_markup(text, raw_markup)
-
+            text = convert_entities_to_html(raw_text, message.entities)
+        else:
+            text = html.escape(raw_text)
+        
+        # Check if text needs splitting
+        text_chunks = split_text(text, max_length=4000)
+        
         # Handle posts based on media type
         match media_type:
             case MediaType.TEXT:
-                # Text-only post - send without attachments
-                await self.max_client.send_message(
-                    chat_id=max_channel_id,
-                    text=text,
-                    markup=markup,
-                )
+                # Text-only post - send all chunks
+                for i, chunk in enumerate(text_chunks):
+                    await self.max_client.send_message(
+                        chat_id=max_channel_id,
+                        text=chunk,
+                        format="html",
+                    )
+                    if i < len(text_chunks) - 1:
+                        await asyncio.sleep(1)  # Rate limit between chunks
+                    
             case MediaType.PHOTO:
-                await self._transfer_photo(message, max_channel_id, text, markup)
+                await self._transfer_photo(message, max_channel_id, text_chunks)
             case MediaType.VIDEO:
-                await self._transfer_video(message, max_channel_id, text, markup)
+                await self._transfer_video(message, max_channel_id, text_chunks)
             case MediaType.AUDIO:
-                await self._transfer_audio(message, max_channel_id, text, markup)
+                await self._transfer_audio(message, max_channel_id, text_chunks)
             case MediaType.FILE:
-                await self._transfer_file(message, max_channel_id, text, markup)
+                await self._transfer_file(message, max_channel_id, text_chunks)
             case MediaType.UNSUPPORTED:
                 # Unsupported - send as text only
-                await self.max_client.send_message(
-                    chat_id=max_channel_id,
-                    text=text,
-                    markup=markup,
-                )
+                for i, chunk in enumerate(text_chunks):
+                    await self.max_client.send_message(
+                        chat_id=max_channel_id,
+                        text=chunk,
+                        format="html",
+                    )
+                    if i < len(text_chunks) - 1:
+                        await asyncio.sleep(1)
             case _:
                 # Fallback - send as text only
-                await self.max_client.send_message(
-                    chat_id=max_channel_id,
-                    text=text,
-                    markup=markup,
-                )
+                for i, chunk in enumerate(text_chunks):
+                    await self.max_client.send_message(
+                        chat_id=max_channel_id,
+                        text=chunk,
+                        format="html",
+                    )
+                    if i < len(text_chunks) - 1:
+                        await asyncio.sleep(1)
 
     async def _transfer_photo(
         self,
         message: Message,
         max_channel_id: str | int | int,
-        text: str,
-        markup: list[dict] | None = None,
+        text_chunks: list[str],
     ) -> None:
         """Transfer a photo post."""
-        # Download photo to BytesIO - Telethon returns bytes when passed BytesIO
+        # Download photo to BytesIO
         buf = io.BytesIO()
         await message.download_media(file=buf)
         buf.seek(0)
@@ -560,26 +643,36 @@ class TransferEngine:
             logger.warning(f"Empty photo bytes for message {message.id}, skipping")
             raise MaxAPIError("Failed to download photo: empty bytes")
 
-        logger.info(f"Downloaded photo: {len(photo_bytes)} bytes, first 4: {photo_bytes[:4]}")
+        logger.info(f"Downloaded photo: {len(photo_bytes)} bytes")
 
         # Upload to Max
         token = await self.max_client.upload_image(photo_bytes)
 
-        # Send message with attachment in new Max API format
+        # Send first chunk with photo, remaining chunks as separate messages
+        first_chunk = text_chunks[0] if text_chunks else ""
         attachment = {"type": "image", "payload": {"token": token}}
+        
         await self.max_client.send_message(
             chat_id=max_channel_id,
-            text=text,
-            attachments=[attachment] if token else None,
-            markup=markup,
+            text=first_chunk,
+            attachments=[attachment],
+            format="html",
         )
+        
+        # Send remaining text chunks
+        for chunk in text_chunks[1:]:
+            await asyncio.sleep(1)
+            await self.max_client.send_message(
+                chat_id=max_channel_id,
+                text=chunk,
+                format="html",
+            )
 
     async def _transfer_video(
         self,
         message: Message,
         max_channel_id: str | int | int,
-        text: str,
-        markup: list[dict] | None = None,
+        text_chunks: list[str],
     ) -> None:
         """Transfer a video post."""
         # Download video to BytesIO
@@ -592,26 +685,36 @@ class TransferEngine:
             logger.warning(f"Empty video bytes for message {message.id}, skipping")
             raise MaxAPIError("Failed to download video: empty bytes")
 
-        logger.info(f"Downloaded video: {len(video_bytes)} bytes, first 4: {video_bytes[:4]}")
+        logger.info(f"Downloaded video: {len(video_bytes)} bytes")
 
         # Upload to Max
         token = await self.max_client.upload_video(video_bytes)
 
-        # Send message with attachment in new Max API format
+        # Send first chunk with video, remaining chunks as separate messages
+        first_chunk = text_chunks[0] if text_chunks else ""
         attachment = {"type": "video", "payload": {"token": token}}
+        
         await self.max_client.send_message(
             chat_id=max_channel_id,
-            text=text,
-            attachments=[attachment] if token else None,
-            markup=markup,
+            text=first_chunk,
+            attachments=[attachment],
+            format="html",
         )
+        
+        # Send remaining text chunks
+        for chunk in text_chunks[1:]:
+            await asyncio.sleep(1)
+            await self.max_client.send_message(
+                chat_id=max_channel_id,
+                text=chunk,
+                format="html",
+            )
 
     async def _transfer_audio(
         self,
         message: Message,
         max_channel_id: str | int | int,
-        text: str,
-        markup: list[dict] | None = None,
+        text_chunks: list[str],
     ) -> None:
         """Transfer an audio post."""
         # Download audio to BytesIO
@@ -624,26 +727,36 @@ class TransferEngine:
             logger.warning(f"Empty audio bytes for message {message.id}, skipping")
             raise MaxAPIError("Failed to download audio: empty bytes")
 
-        logger.info(f"Downloaded audio: {len(audio_bytes)} bytes, first 4: {audio_bytes[:4]}")
+        logger.info(f"Downloaded audio: {len(audio_bytes)} bytes")
 
         # Upload to Max
         token = await self.max_client.upload_audio(audio_bytes)
 
-        # Send message with attachment in new Max API format
+        # Send first chunk with audio, remaining chunks as separate messages
+        first_chunk = text_chunks[0] if text_chunks else ""
         attachment = {"type": "audio", "payload": {"token": token}}
+        
         await self.max_client.send_message(
             chat_id=max_channel_id,
-            text=text,
-            attachments=[attachment] if token else None,
-            markup=markup,
+            text=first_chunk,
+            attachments=[attachment],
+            format="html",
         )
+        
+        # Send remaining text chunks
+        for chunk in text_chunks[1:]:
+            await asyncio.sleep(1)
+            await self.max_client.send_message(
+                chat_id=max_channel_id,
+                text=chunk,
+                format="html",
+            )
 
     async def _transfer_file(
         self,
         message: Message,
         max_channel_id: str | int | int,
-        text: str,
-        markup: list[dict] | None = None,
+        text_chunks: list[str],
     ) -> None:
         """Transfer a file/document post."""
         # Download file to BytesIO
@@ -656,19 +769,30 @@ class TransferEngine:
             logger.warning(f"Empty file bytes for message {message.id}, skipping")
             raise MaxAPIError("Failed to download file: empty bytes")
 
-        logger.info(f"Downloaded file: {len(file_bytes)} bytes, first 4: {file_bytes[:4]}")
+        logger.info(f"Downloaded file: {len(file_bytes)} bytes")
 
         # Upload to Max
         token = await self.max_client.upload_file(file_bytes)
 
-        # Send message with attachment in new Max API format
+        # Send first chunk with file, remaining chunks as separate messages
+        first_chunk = text_chunks[0] if text_chunks else ""
         attachment = {"type": "file", "payload": {"token": token}}
+        
         await self.max_client.send_message(
             chat_id=max_channel_id,
-            text=text,
-            attachments=[attachment] if token else None,
-            markup=markup,
+            text=first_chunk,
+            attachments=[attachment],
+            format="html",
         )
+        
+        # Send remaining text chunks
+        for chunk in text_chunks[1:]:
+            await asyncio.sleep(1)
+            await self.max_client.send_message(
+                chat_id=max_channel_id,
+                text=chunk,
+                format="html",
+            )
 
     async def _transfer_album(
         self,
