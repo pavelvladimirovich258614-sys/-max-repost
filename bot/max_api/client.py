@@ -425,7 +425,7 @@ class MaxClient:
             for chat in chats
         ]
 
-    async def find_chat_id(self, timeout: int = 30) -> int | None:
+    async def find_chat_id(self, timeout: int = 60) -> int | None:
         """
         Listen for updates and find channel or chat chat_id.
 
@@ -445,12 +445,15 @@ class MaxClient:
             "types": "bot_added,bot_started,message_created,message_callback,user_added"
         }
 
-        logger.info(f"Polling /updates with timeout={timeout}s for chat_id (channel or chat)")
+        logger.info(f"Polling /updates with timeout={timeout}s...")
 
         try:
             response = await self._request("GET", "/updates", params=params)
             updates = response.get("updates", [])
-            logger.info(f"Received {len(updates)} updates")
+            logger.info(f"Processing {len(updates)} updates...")
+
+            if not updates:
+                logger.info("No updates received from Max API")
 
             # === DIAGNOSTIC: Log raw response (first 3000 chars) ===
             try:
@@ -461,11 +464,16 @@ class MaxClient:
 
             for update in updates:
                 update_type = update.get("update_type", "unknown")
+                message = update.get("message", {})
+                text_preview = ""
+                if message and message.get("text"):
+                    text = message.get("text", "")
+                    text_preview = f", text='{text[:50]}...'" if len(text) > 50 else f", text='{text}'"
+                logger.info(f"Update: type={update_type}, chat_id={update.get('chat_id')}, has_message={bool(message)}{text_preview}")
                 logger.info(f"Processing update: type={update_type}, keys={list(update.keys())}")
 
                 # === DIAGNOSTIC: Detailed update structure logging ===
                 # Log message structure if present
-                message = update.get("message", {})
                 if message:
                     logger.info(f"Message keys: {list(message.keys())}")
                     logger.info(f"Message recipient: {message.get('recipient')}")
@@ -484,6 +492,7 @@ class MaxClient:
                 chat_type = None
 
                 # PRIORITY 1: bot_added event - bot was added to a channel/chat
+                logger.info(f"Checking priority 1: bot_added event")
                 if update_type == "bot_added":
                     chat_id = update.get("chat_id")
                     chat = update.get("chat", {})
@@ -493,6 +502,7 @@ class MaxClient:
                         return int(chat_id)
 
                 # PRIORITY 2: bot_started event - user started bot in a chat
+                logger.info(f"Checking priority 2: bot_started event")
                 if update_type == "bot_started":
                     chat_id = update.get("chat_id")
                     chat = update.get("chat", {})
@@ -502,6 +512,7 @@ class MaxClient:
                         return int(chat_id)
 
                 # PRIORITY 3: message.recipient.chat_id (standard format for messages)
+                logger.info(f"Checking priority 3: message.recipient.chat_id")
                 if not chat_id and message:
                     recipient = message.get("recipient", {})
                     if recipient.get("chat_id"):
@@ -510,12 +521,14 @@ class MaxClient:
                         logger.info(f"Found chat_id from message.recipient: {chat_id}, type: {chat_type}")
 
                 # PRIORITY 4: message.chat_id (direct field)
+                logger.info(f"Checking priority 4: message.chat_id")
                 if not chat_id and message:
                     if message.get("chat_id"):
                         chat_id = message["chat_id"]
                         logger.info(f"Found chat_id from message.chat_id: {chat_id}")
 
                 # PRIORITY 5: message.chat.chat_id or message.chat.id (nested chat object)
+                logger.info(f"Checking priority 5: message.chat.chat_id")
                 if not chat_id and message:
                     msg_chat = message.get("chat", {})
                     if msg_chat.get("chat_id"):
@@ -528,6 +541,7 @@ class MaxClient:
                         logger.info(f"Found chat_id from message.chat.id: {chat_id}, type: {chat_type}")
 
                 # PRIORITY 6: update-level chat_id (user_added, etc.)
+                logger.info(f"Checking priority 6: update-level chat_id")
                 if not chat_id:
                     if update.get("chat_id"):
                         chat_id = update["chat_id"]
@@ -535,6 +549,7 @@ class MaxClient:
                         logger.info(f"Found chat_id from update-level: {chat_id}, type: {chat_type}")
 
                 # PRIORITY 7: message.body.chat_id (some update types)
+                logger.info(f"Checking priority 7: message.body.chat_id")
                 if not chat_id and message:
                     body = message.get("body", {})
                     if body.get("chat_id"):

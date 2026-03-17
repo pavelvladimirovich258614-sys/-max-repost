@@ -34,19 +34,26 @@ class MaxBotListener:
         self.headers = {"Authorization": access_token}
         self._running = False
         self._marker = None
+        self._reconnect_attempts = 0
+        self._max_reconnects = 10
     
     async def start(self):
         """Запустить прослушивание сообщений"""
         self._running = True
-        logger.info("Max bot listener started")
+        logger.info(f"Max listener polling started, token_prefix={self.access_token[:10]}...")
         
         while self._running:
             try:
                 await self._poll_updates()
+                self._reconnect_attempts = 0  # Reset on success
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Max bot listener error: {e}")
+                self._reconnect_attempts += 1
+                if self._reconnect_attempts > self._max_reconnects:
+                    logger.error(f"Max listener max reconnects ({self._max_reconnects}) reached, stopping")
+                    break
+                logger.error(f"Max listener reconnecting, attempt {self._reconnect_attempts}/{self._max_reconnects}, reason: {e}", exc_info=True)
                 await asyncio.sleep(5)
     
     async def stop(self):
@@ -56,6 +63,7 @@ class MaxBotListener:
     
     async def _poll_updates(self):
         """Получить и обработать обновления"""
+        logger.debug("Max listener waiting for updates...")
         params = {
             "timeout": 30,
             "limit": 100,

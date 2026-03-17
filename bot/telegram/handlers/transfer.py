@@ -1015,7 +1015,7 @@ async def detect_channel_auto(callback: CallbackQuery, state) -> None:
     await callback.answer("⏳ Определяю ID...")
 
     await callback.message.edit_text(
-        "⏳ <b>Слушаю обновления Max API...</b> (до 30 сек)\n\n"
+        "⏳ <b>Слушаю обновления Max API...</b> (до 60 сек)\n\n"
         "Если бот уже в канале/чате — напишите любое сообщение в канал/чат Max.",
         parse_mode="HTML",
     )
@@ -1024,8 +1024,8 @@ async def detect_channel_auto(callback: CallbackQuery, state) -> None:
         # Use asyncio.wait_for to prevent blocking the bot for too long
         async with MaxClient() as client:
             chat_id = await asyncio.wait_for(
-                client.find_chat_id(timeout=30),
-                timeout=35  # Slightly longer than API timeout
+                client.find_chat_id(timeout=60),
+                timeout=65  # Slightly longer than API timeout
             )
 
         if chat_id:
@@ -1041,10 +1041,11 @@ async def detect_channel_auto(callback: CallbackQuery, state) -> None:
             # No channel/chat found
             await callback.message.edit_text(
                 "❌ <b>Не удалось определить ID</b>\n\n"
-                "Попробуйте:\n"
-                "1. Удалите бота из канала/чата и добавьте заново\n"
-                "2. Напишите сообщение в канал/чат\n"
-                "3. Нажмите <b>'Определить ID'</b> ещё раз",
+                "Убедитесь что:\n"
+                "1. Бот @id752703975446_1_bot добавлен в канал/чат Max\n"
+                "2. Бот имеет права администратора в канале Max\n"
+                "3. Вы написали любое сообщение в этот канал ПОСЛЕ добавления бота\n\n"
+                "Попробуйте ещё раз:",
                 parse_mode="HTML",
                 reply_markup=retry_detect_keyboard(),
             )
@@ -1053,11 +1054,11 @@ async def detect_channel_auto(callback: CallbackQuery, state) -> None:
         logger.warning("Channel detection timed out")
         await callback.message.edit_text(
             "❌ <b>Не удалось определить ID</b>\n\n"
-            "Таймаут ожидания (30 сек).\n\n"
-            "Попробуйте:\n"
-            "1. Удалите бота из канала/чата и добавьте заново\n"
-            "2. Напишите сообщение в канал/чат\n"
-            "3. Нажмите <b>'Определить ID'</b> ещё раз",
+            "Убедитесь что:\n"
+            "1. Бот @id752703975446_1_bot добавлен в канал/чат Max\n"
+            "2. Бот имеет права администратора в канале Max\n"
+            "3. Вы написали любое сообщение в этот канал ПОСЛЕ добавления бота\n\n"
+            "Попробуйте ещё раз:",
             parse_mode="HTML",
             reply_markup=retry_detect_keyboard(),
         )

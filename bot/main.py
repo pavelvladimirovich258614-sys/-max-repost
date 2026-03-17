@@ -1,6 +1,7 @@
 """Main entry point for the Max-Repost Bot."""
 
 import asyncio
+import logging
 
 from bot.utils.logger import init_logger
 from bot.telegram.bot import init_bot
@@ -91,6 +92,8 @@ async def main() -> None:
             await listener_task
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            logger.error(f"Max listener task failed: {e}", exc_info=True)
         print("Max-Repost Bot stopped")
 
 
