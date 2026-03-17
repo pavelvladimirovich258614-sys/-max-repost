@@ -997,41 +997,73 @@ class TransferEngine:
                 if size_mb > 100:
                     logger.warning(f"Video {message.id} exceeds size limit: {size_mb:.1f}MB > 100MB")
                     raise MaxAPIError(f"video too large: {size_mb:.1f}MB (max 100MB)")
-        
-        # Download video to BytesIO
-        buf = io.BytesIO()
-        await message.download_media(file=buf)
-        buf.seek(0)
-        video_bytes = buf.read()
 
-        if not video_bytes or len(video_bytes) == 0:
-            logger.warning(f"Empty video bytes for message {message.id}, skipping")
-            raise MaxAPIError("Failed to download video: empty bytes")
+        # Get file extension
+        ext = '.mp4'  # default for video
+        if message.media and isinstance(message.media, MessageMediaDocument):
+            doc = message.media.document
+            for attr in doc.attributes:
+                if isinstance(attr, DocumentAttributeFilename):
+                    ext = os.path.splitext(attr.file_name)[1] or '.mp4'
+                    break
 
-        logger.info(f"Downloaded video: {len(video_bytes)} bytes")
+        # Create temp file
+        temp_path = os.path.join(tempfile.gettempdir(), f"transfer_{message.id}_{int(time.time())}{ext}")
 
-        # Upload to Max
-        token = await self.max_client.upload_video(video_bytes)
+        try:
+            # STAGE 1 - Downloading
+            logger.info(f"Downloading video {message.id} to temp file...")
+            start_time = time.time()
+            await message.download_media(file=temp_path)
+            download_time = time.time() - start_time
 
-        # Send first chunk with video, remaining chunks as separate messages
-        first_chunk = text_chunks[0] if text_chunks else ""
-        attachment = {"type": "video", "payload": {"token": token}}
-        
-        await self.max_client.send_message(
-            chat_id=max_channel_id,
-            text=first_chunk,
-            attachments=[attachment],
-            format="html",
-        )
-        
-        # Send remaining text chunks
-        for chunk in text_chunks[1:]:
-            await asyncio.sleep(1)
+            # Get file size
+            file_size = os.path.getsize(temp_path)
+            speed_mbps = (file_size / (1024*1024)) / download_time if download_time > 0 else 0
+            logger.info(f"Downloaded video {message.id} to {temp_path}: {file_size} bytes in {download_time:.1f}s ({speed_mbps:.1f} MB/s)")
+
+            # Read file for upload
+            with open(temp_path, 'rb') as f:
+                video_bytes = f.read()
+
+            if not video_bytes or len(video_bytes) == 0:
+                logger.warning(f"Empty video bytes for message {message.id}, skipping")
+                raise MaxAPIError("Failed to download video: empty bytes")
+
+            # STAGE 2 - Upload
+            logger.info(f"Uploading video {message.id}, size={len(video_bytes)} bytes")
+            token = await self.max_client.upload_video(video_bytes)
+            logger.info(f"Upload successful, token={token[:20]}...")
+
+            # STAGE 3 - Sending
+            logger.info(f"Sending video message to {max_channel_id}")
+            first_chunk = text_chunks[0] if text_chunks else ""
+            attachment = {"type": "video", "payload": {"token": token}}
+            
             await self.max_client.send_message(
                 chat_id=max_channel_id,
-                text=chunk,
+                text=first_chunk,
+                attachments=[attachment],
                 format="html",
             )
+            logger.info(f"Successfully sent video message {message.id}")
+            
+            # Send remaining text chunks
+            for chunk in text_chunks[1:]:
+                await asyncio.sleep(1)
+                await self.max_client.send_message(
+                    chat_id=max_channel_id,
+                    text=chunk,
+                    format="html",
+                )
+        finally:
+            # Clean up
+            try:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                    logger.info(f"Cleaned up temp file: {temp_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temp file {temp_path}: {e}")
 
     async def _transfer_audio(
         self,
@@ -1048,62 +1080,86 @@ class TransferEngine:
                 if size_mb > 2048:
                     logger.warning(f"Audio {message.id} exceeds size limit: {size_mb:.1f}MB > 2048MB (2GB)")
                     raise MaxAPIError(f"audio too large: {size_mb:.1f}MB (max 2048MB)")
-        
-        # STAGE 1 - Downloading
-        logger.info(f"Downloading audio {message.id}...")
+
+        # Get file extension
+        ext = '.bin'  # default
+        if message.media and isinstance(message.media, MessageMediaDocument):
+            doc = message.media.document
+            for attr in doc.attributes:
+                if isinstance(attr, DocumentAttributeFilename):
+                    ext = os.path.splitext(attr.file_name)[1] or '.bin'
+                    break
+
+        # Create temp file
+        temp_path = os.path.join(tempfile.gettempdir(), f"transfer_{message.id}_{int(time.time())}{ext}")
+
         try:
-            buf = io.BytesIO()
-            await message.download_media(file=buf)
-            buf.seek(0)
-            audio_bytes = buf.read()
-            logger.info(f"Downloaded audio {message.id}: {len(audio_bytes)} bytes")
-        except Exception as e:
-            logger.error(f"Download failed for audio {message.id}: {e}", exc_info=True)
-            raise
+            # STAGE 1 - Downloading
+            logger.info(f"Downloading audio {message.id} to temp file...")
+            start_time = time.time()
+            await message.download_media(file=temp_path)
+            download_time = time.time() - start_time
 
-        if not audio_bytes or len(audio_bytes) == 0:
-            logger.warning(f"Empty audio bytes for message {message.id}, skipping")
-            raise MaxAPIError("Failed to download audio: empty bytes")
+            # Get file size
+            file_size = os.path.getsize(temp_path)
+            speed_mbps = (file_size / (1024*1024)) / download_time if download_time > 0 else 0
+            logger.info(f"Downloaded audio {message.id} to {temp_path}: {file_size} bytes in {download_time:.1f}s ({speed_mbps:.1f} MB/s)")
 
-        # Warning for large files
-        if len(audio_bytes) > 50 * 1024 * 1024:  # 50 MB
-            logger.warning(f"Large audio file: {len(audio_bytes)} bytes, may take time...")
+            # Read file for upload
+            with open(temp_path, 'rb') as f:
+                audio_bytes = f.read()
 
-        # STAGE 2 - Upload
-        logger.info(f"Uploading audio {message.id}, size={len(audio_bytes)} bytes")
-        try:
-            token = await self.max_client.upload_audio(audio_bytes)
-            logger.info(f"Upload successful, token={token[:20]}...")
-        except Exception as e:
-            logger.error(f"Upload failed for audio {message.id}: {e}", exc_info=True)
-            raise
+            if not audio_bytes or len(audio_bytes) == 0:
+                logger.warning(f"Empty audio bytes for message {message.id}, skipping")
+                raise MaxAPIError("Failed to download audio: empty bytes")
 
-        # STAGE 3 - Sending
-        logger.info(f"Sending audio message to {max_channel_id}")
-        try:
-            # Send first chunk with audio, remaining chunks as separate messages
-            first_chunk = text_chunks[0] if text_chunks else ""
-            attachment = {"type": "audio", "payload": {"token": token}}
+            # Warning for large files
+            if len(audio_bytes) > 50 * 1024 * 1024:  # 50 MB
+                logger.warning(f"Large audio file: {len(audio_bytes)} bytes, may take time...")
 
-            await self.max_client.send_message(
-                chat_id=max_channel_id,
-                text=first_chunk,
-                attachments=[attachment],
-                format="html",
-            )
-            logger.info(f"Successfully sent audio message {message.id}")
-        except Exception as e:
-            logger.error(f"Send failed for audio {message.id}: {e}", exc_info=True)
-            raise
+            # STAGE 2 - Upload
+            logger.info(f"Uploading audio {message.id}, size={len(audio_bytes)} bytes")
+            try:
+                token = await self.max_client.upload_audio(audio_bytes)
+                logger.info(f"Upload successful, token={token[:20]}...")
+            except Exception as e:
+                logger.error(f"Upload failed for audio {message.id}: {e}", exc_info=True)
+                raise
 
-        # Send remaining text chunks
-        for chunk in text_chunks[1:]:
-            await asyncio.sleep(1)
-            await self.max_client.send_message(
-                chat_id=max_channel_id,
-                text=chunk,
-                format="html",
-            )
+            # STAGE 3 - Sending
+            logger.info(f"Sending audio message to {max_channel_id}")
+            try:
+                # Send first chunk with audio, remaining chunks as separate messages
+                first_chunk = text_chunks[0] if text_chunks else ""
+                attachment = {"type": "audio", "payload": {"token": token}}
+
+                await self.max_client.send_message(
+                    chat_id=max_channel_id,
+                    text=first_chunk,
+                    attachments=[attachment],
+                    format="html",
+                )
+                logger.info(f"Successfully sent audio message {message.id}")
+            except Exception as e:
+                logger.error(f"Send failed for audio {message.id}: {e}", exc_info=True)
+                raise
+
+            # Send remaining text chunks
+            for chunk in text_chunks[1:]:
+                await asyncio.sleep(1)
+                await self.max_client.send_message(
+                    chat_id=max_channel_id,
+                    text=chunk,
+                    format="html",
+                )
+        finally:
+            # Clean up
+            try:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                    logger.info(f"Cleaned up temp file: {temp_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temp file {temp_path}: {e}")
 
     async def _transfer_file(
         self,
@@ -1120,41 +1176,73 @@ class TransferEngine:
                 if size_mb > 50:
                     logger.warning(f"File {message.id} exceeds size limit: {size_mb:.1f}MB > 50MB")
                     raise MaxAPIError(f"file too large: {size_mb:.1f}MB (max 50MB)")
-        
-        # Download file to BytesIO
-        buf = io.BytesIO()
-        await message.download_media(file=buf)
-        buf.seek(0)
-        file_bytes = buf.read()
 
-        if not file_bytes or len(file_bytes) == 0:
-            logger.warning(f"Empty file bytes for message {message.id}, skipping")
-            raise MaxAPIError("Failed to download file: empty bytes")
+        # Get file extension
+        ext = '.bin'  # default
+        if message.media and isinstance(message.media, MessageMediaDocument):
+            doc = message.media.document
+            for attr in doc.attributes:
+                if isinstance(attr, DocumentAttributeFilename):
+                    ext = os.path.splitext(attr.file_name)[1] or '.bin'
+                    break
 
-        logger.info(f"Downloaded file: {len(file_bytes)} bytes")
+        # Create temp file
+        temp_path = os.path.join(tempfile.gettempdir(), f"transfer_{message.id}_{int(time.time())}{ext}")
 
-        # Upload to Max
-        token = await self.max_client.upload_file(file_bytes)
+        try:
+            # STAGE 1 - Downloading
+            logger.info(f"Downloading file {message.id} to temp file...")
+            start_time = time.time()
+            await message.download_media(file=temp_path)
+            download_time = time.time() - start_time
 
-        # Send first chunk with file, remaining chunks as separate messages
-        first_chunk = text_chunks[0] if text_chunks else ""
-        attachment = {"type": "file", "payload": {"token": token}}
-        
-        await self.max_client.send_message(
-            chat_id=max_channel_id,
-            text=first_chunk,
-            attachments=[attachment],
-            format="html",
-        )
-        
-        # Send remaining text chunks
-        for chunk in text_chunks[1:]:
-            await asyncio.sleep(1)
+            # Get file size
+            file_size = os.path.getsize(temp_path)
+            speed_mbps = (file_size / (1024*1024)) / download_time if download_time > 0 else 0
+            logger.info(f"Downloaded file {message.id} to {temp_path}: {file_size} bytes in {download_time:.1f}s ({speed_mbps:.1f} MB/s)")
+
+            # Read file for upload
+            with open(temp_path, 'rb') as f:
+                file_bytes = f.read()
+
+            if not file_bytes or len(file_bytes) == 0:
+                logger.warning(f"Empty file bytes for message {message.id}, skipping")
+                raise MaxAPIError("Failed to download file: empty bytes")
+
+            # STAGE 2 - Upload
+            logger.info(f"Uploading file {message.id}, size={len(file_bytes)} bytes")
+            token = await self.max_client.upload_file(file_bytes)
+            logger.info(f"Upload successful, token={token[:20]}...")
+
+            # STAGE 3 - Sending
+            logger.info(f"Sending file message to {max_channel_id}")
+            first_chunk = text_chunks[0] if text_chunks else ""
+            attachment = {"type": "file", "payload": {"token": token}}
+            
             await self.max_client.send_message(
                 chat_id=max_channel_id,
-                text=chunk,
+                text=first_chunk,
+                attachments=[attachment],
                 format="html",
             )
+            logger.info(f"Successfully sent file message {message.id}")
+            
+            # Send remaining text chunks
+            for chunk in text_chunks[1:]:
+                await asyncio.sleep(1)
+                await self.max_client.send_message(
+                    chat_id=max_channel_id,
+                    text=chunk,
+                    format="html",
+                )
+        finally:
+            # Clean up
+            try:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                    logger.info(f"Cleaned up temp file: {temp_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temp file {temp_path}: {e}")
 
     async def _transfer_album(
         self,

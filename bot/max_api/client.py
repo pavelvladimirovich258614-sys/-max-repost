@@ -690,51 +690,72 @@ class MaxClient:
         Raises:
             MaxAPIError: On upload failure
         """
-        # Prepare file content
-        if isinstance(file_path, (str, Path)):
+        # Use longer timeout for large file uploads (10 minutes)
+        timeout = aiohttp.ClientTimeout(total=600, connect=60)
+
+        # Check if file_path is a file path (str/Path) or bytes
+        is_file_path = isinstance(file_path, (str, Path)) and os.path.exists(str(file_path))
+
+        if is_file_path:
+            # Streaming upload from file - memory efficient for large files
             file_path_str = str(file_path)
-            if not os.path.exists(file_path_str):
+            file_size = os.path.getsize(file_path_str)
+            use_resumable = file_size > 50 * 1024 * 1024  # > 50MB
+
+            logger.info(f"Streaming upload: {filename}, size={file_size} bytes, timeout=600s")
+
+            async with aiohttp.ClientSession(timeout=timeout) as upload_session:
+                with open(file_path_str, 'rb') as f:
+                    if use_resumable:
+                        # Resumable upload: NO Content-Type header, raw binary data
+                        logger.info(f"Using resumable upload for large file ({file_size} bytes)")
+                        async with upload_session.post(url, data=f) as response:
+                            return await self._handle_upload_response(response)
+                    else:
+                        # Standard multipart upload with streaming
+                        form = aiohttp.FormData()
+                        form.add_field(
+                            'data',  # Field name must be exactly "data" per Max API spec
+                            f,
+                            filename=filename,
+                            content_type=content_type,
+                        )
+                        async with upload_session.post(url, data=form) as response:
+                            return await self._handle_upload_response(response)
+        else:
+            # Bytes upload (backward compatibility)
+            if isinstance(file_path, (str, Path)):
+                # File path that doesn't exist - treat as error
+                file_path_str = str(file_path)
                 raise MaxAPIError(f"File not found: {file_path_str}")
 
-            with open(file_path_str, "rb") as f:
-                file_content = f.read()
-        else:
             file_content = file_path
+            file_size = len(file_content)
+            use_resumable = file_size > 50 * 1024 * 1024  # > 50MB
 
-        # Log file info for debugging
-        file_size = len(file_content)
-        logger.info(f"Uploading file: {filename}, content_type: {content_type}, size: {file_size} bytes")
-        logger.info(f"First 4 bytes: {file_content[:4]}")
+            logger.info(f"Uploading from bytes: {filename}, size={file_size} bytes, timeout=600s")
+            logger.info(f"First 4 bytes: {file_content[:4]}")
 
-        if not file_content or file_size == 0:
-            raise MaxAPIError("Cannot upload empty file")
+            if not file_content or file_size == 0:
+                raise MaxAPIError("Cannot upload empty file")
 
-        # Determine if we should use resumable upload for large files
-        use_resumable = file_size > 50 * 1024 * 1024  # > 50MB
-
-        # Upload using POST 
-        # Use a CLEAN session without Authorization header - upload URL is pre-signed
-        timeout_seconds = 300
-        timeout = aiohttp.ClientTimeout(total=timeout_seconds, connect=30)
-        logger.info(f"Upload timeout set to {timeout_seconds}s for large file")
-        async with aiohttp.ClientSession(timeout=timeout) as upload_session:
-            if use_resumable:
-                # Resumable upload: NO Content-Type header, raw binary data
-                logger.info(f"Using resumable upload for large file ({file_size} bytes)")
-                async with upload_session.post(url, data=file_content) as response:
-                    return await self._handle_upload_response(response)
-            else:
-                # Standard multipart upload
-                form = aiohttp.FormData()
-                form.add_field(
-                    'data',           # Field name must be exactly "data" per Max API spec
-                    file_content,
-                    filename=filename,
-                    content_type=content_type,
-                )
-
-                async with upload_session.post(url, data=form) as response:
-                    return await self._handle_upload_response(response)
+            async with aiohttp.ClientSession(timeout=timeout) as upload_session:
+                if use_resumable:
+                    # Resumable upload: NO Content-Type header, raw binary data
+                    logger.info(f"Using resumable upload for large file ({file_size} bytes)")
+                    async with upload_session.post(url, data=file_content) as response:
+                        return await self._handle_upload_response(response)
+                else:
+                    # Standard multipart upload
+                    form = aiohttp.FormData()
+                    form.add_field(
+                        'data',  # Field name must be exactly "data" per Max API spec
+                        file_content,
+                        filename=filename,
+                        content_type=content_type,
+                    )
+                    async with upload_session.post(url, data=form) as response:
+                        return await self._handle_upload_response(response)
 
     async def _handle_upload_response(self, response) -> dict:
         """
@@ -838,6 +859,8 @@ class MaxClient:
         Note: For video, token comes in first response but file
         must still be uploaded to the URL.
 
+        Supports both file path (streaming, memory-efficient) and bytes.
+
         Args:
             file_path: Path to video file or bytes content
 
@@ -847,6 +870,14 @@ class MaxClient:
         Raises:
             MaxAPIError: On upload failure
         """
+        # Handle file path vs bytes for logging
+        if isinstance(file_path, (str, Path)) and os.path.exists(str(file_path)):
+            file_size = os.path.getsize(str(file_path))
+            logger.info(f"Uploading video from file: {file_path}, size={file_size} bytes, timeout=600s")
+        else:
+            file_size = len(file_path) if isinstance(file_path, (bytes, bytearray)) else 0
+            logger.info(f"Uploading video from bytes, size={file_size} bytes, timeout=600s")
+
         upload_info = await self._upload_initiate(MediaType.VIDEO)
         upload_response = await self._upload_file(
             upload_info.url,
@@ -878,6 +909,8 @@ class MaxClient:
         """
         Upload an audio file and return its token.
 
+        Supports both file path (streaming, memory-efficient) and bytes.
+
         Args:
             file_path: Path to audio file or bytes content
 
@@ -887,6 +920,14 @@ class MaxClient:
         Raises:
             MaxAPIError: On upload failure
         """
+        # Handle file path vs bytes for logging
+        if isinstance(file_path, (str, Path)) and os.path.exists(str(file_path)):
+            file_size = os.path.getsize(str(file_path))
+            logger.info(f"Uploading audio from file: {file_path}, size={file_size} bytes, timeout=600s")
+        else:
+            file_size = len(file_path) if isinstance(file_path, (bytes, bytearray)) else 0
+            logger.info(f"Uploading audio from bytes, size={file_size} bytes, timeout=600s")
+
         # Step 1: Initiate upload and get token
         logger.info("Initiating audio upload...")
         upload_info = await self._upload_initiate(MediaType.AUDIO)
@@ -925,6 +966,8 @@ class MaxClient:
 
         For file: token comes from step 2 (upload response)
 
+        Supports both file path (streaming, memory-efficient) and bytes.
+
         Args:
             file_path: Path to file or bytes content
 
@@ -934,6 +977,14 @@ class MaxClient:
         Raises:
             MaxAPIError: On upload failure
         """
+        # Handle file path vs bytes for logging
+        if isinstance(file_path, (str, Path)) and os.path.exists(str(file_path)):
+            file_size = os.path.getsize(str(file_path))
+            logger.info(f"Uploading file from path: {file_path}, size={file_size} bytes, timeout=600s")
+        else:
+            file_size = len(file_path) if isinstance(file_path, (bytes, bytearray)) else 0
+            logger.info(f"Uploading file from bytes, size={file_size} bytes, timeout=600s")
+
         # Step 1: Get upload URL
         upload_info = await self._upload_initiate(MediaType.FILE)
 
