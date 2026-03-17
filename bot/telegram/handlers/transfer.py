@@ -231,7 +231,7 @@ async def show_my_verified_channels(
     Show list of user's verified channels.
     
     Allows quick selection of previously verified channels,
-    skipping the verification step.
+    skipping the verification step. Also allows deleting channels.
     
     Args:
         callback: Callback query
@@ -252,7 +252,29 @@ async def show_my_verified_channels(
                 "Здесь хранятся ваши верифицированные Telegram-каналы. "
                 "Выберите канал для быстрого переноса (без повторной верификации):\n"
             )
-            keyboard = verified_channels_keyboard(channels)
+            # Build keyboard manually with 2 columns (channel + delete button)
+            builder = InlineKeyboardBuilder()
+            
+            for channel in channels:
+                display_name = channel.tg_channel[:30] if len(channel.tg_channel) <= 30 else channel.tg_channel[:27] + "..."
+                # Channel button (column 1)
+                builder.button(
+                    text=f"📢 @{display_name}",
+                    callback_data=f"select_verified_channel:{channel.tg_channel}",
+                )
+                # Delete button (column 2)
+                builder.button(
+                    text="🗑",
+                    callback_data=f"delete_verified_channel:{channel.tg_channel}",
+                )
+            
+            # Add new channel button
+            builder.button(text="➕ Добавить новый канал", callback_data="start_setup_transfer")
+            builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+            
+            # Adjust layout: 2 columns for channels+delete, then 1 column for bottom buttons
+            builder.adjust(2, repeat=True)
+            keyboard = builder.as_markup()
         else:
             text = (
                 "<b>📢 Мои каналы</b>\n\n"
@@ -270,6 +292,146 @@ async def show_my_verified_channels(
     except Exception as e:
         logger.error(f"Error loading verified channels for user {user_id}: {e}")
         await callback.answer("❌ Ошибка загрузки каналов", show_alert=True)
+
+
+@transfer_router.callback_query(lambda c: c.data.startswith("delete_verified_channel:"))
+async def delete_verified_channel_prompt(
+    callback: CallbackQuery,
+    state,
+    verified_channel_repo: VerifiedChannelRepository,
+) -> None:
+    """
+    Show confirmation for deleting a verified channel.
+    
+    Args:
+        callback: Callback query
+        state: FSM state
+        verified_channel_repo: Repository for verified channels
+    """
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
+    # Extract channel from callback_data
+    tg_channel = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    
+    try:
+        # Verify the channel exists for this user
+        channel = await verified_channel_repo.get_verified_channel(user_id, tg_channel)
+        if not channel:
+            await callback.answer("❌ Канал не найден", show_alert=True)
+            return
+        
+        # Store channel in state for confirmation handler
+        await state.update_data(channel_to_delete=tg_channel)
+        
+        text = (
+            "🗑 <b>Удаление канала</b>\n\n"
+            f"Вы уверены, что хотите удалить канал <b>@{tg_channel}</b> из списка?\n\n"
+            "⚠️ Это также удалит все сохранённые привязки к каналам Max для этого канала.\n\n"
+            "Действие нельзя отменить."
+        )
+        
+        builder = InlineKeyboardBuilder()
+        builder.button(text="✅ Да, удалить", callback_data="confirm_delete_verified_channel")
+        builder.button(text="❌ Отмена", callback_data="cancel_delete_verified_channel")
+        builder.adjust(2)
+        
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=builder.as_markup(),
+        )
+        
+    except Exception as e:
+        logger.error(f"Error preparing delete for channel {tg_channel}: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@transfer_router.callback_query(lambda c: c.data == "confirm_delete_verified_channel")
+async def confirm_delete_verified_channel(
+    callback: CallbackQuery,
+    state,
+    db_session,
+    verified_channel_repo: VerifiedChannelRepository,
+) -> None:
+    """
+    Confirm deletion of a verified channel.
+    
+    Deletes the verified channel record and all related Max channel bindings.
+    
+    Args:
+        callback: Callback query
+        state: FSM state
+        db_session: Database session
+        verified_channel_repo: Repository for verified channels
+    """
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
+    user_id = callback.from_user.id
+    
+    # Get channel from state
+    data = await state.get_data()
+    tg_channel = data.get("channel_to_delete")
+    
+    if not tg_channel:
+        await callback.answer("❌ Ошибка: данные утеряны", show_alert=True)
+        return
+    
+    try:
+        # Delete related Max channel bindings first
+        binding_repo = MaxChannelBindingRepository(db_session)
+        bindings = await binding_repo.get_by_user_and_tg_channel(user_id, tg_channel)
+        for binding in bindings:
+            try:
+                await binding_repo.delete_binding(user_id, binding.id)
+                logger.info(f"Deleted binding {binding.id} for user {user_id}, channel {tg_channel}")
+            except Exception as e:
+                logger.warning(f"Failed to delete binding {binding.id}: {e}")
+        
+        # Delete the verified channel
+        deleted = await verified_channel_repo.delete_verification(user_id, tg_channel)
+        
+        if deleted:
+            await callback.answer("✅ Канал удалён", show_alert=True)
+            logger.info(f"User {user_id} deleted verified channel {tg_channel}")
+        else:
+            await callback.answer("❌ Канал не найден", show_alert=True)
+        
+        # Clear the channel_to_delete from state
+        await state.update_data(channel_to_delete=None)
+        
+        # Refresh the channel list
+        await show_my_verified_channels(callback, verified_channel_repo)
+        
+    except Exception as e:
+        logger.error(f"Error deleting verified channel {tg_channel}: {e}")
+        await callback.answer("❌ Ошибка удаления", show_alert=True)
+
+
+@transfer_router.callback_query(lambda c: c.data == "cancel_delete_verified_channel")
+async def cancel_delete_verified_channel(
+    callback: CallbackQuery,
+    state,
+    verified_channel_repo: VerifiedChannelRepository,
+) -> None:
+    """
+    Cancel deletion and return to channel list.
+    
+    Args:
+        callback: Callback query
+        state: FSM state
+        verified_channel_repo: Repository for verified channels
+    """
+    # Answer callback FIRST before any async operations
+    await callback.answer("Отменено")
+    
+    # Clear the channel_to_delete from state
+    await state.update_data(channel_to_delete=None)
+    
+    # Return to channel list
+    await show_my_verified_channels(callback, verified_channel_repo)
 
 
 @transfer_router.callback_query(lambda c: c.data.startswith("select_verified_channel:"))
@@ -521,9 +683,11 @@ async def verify_admin_after_prompt(
     channel_title = data.get("transfer_tg_channel_title", "Канал")
 
     if not channel_id:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await callback.message.edit_text(
             "❌ Ошибка: данные канала утеряны. Начните заново.",
-            reply_markup=back_to_start_keyboard(),
+            reply_markup=builder.as_markup(),
         )
         await callback.answer()
         await state.clear()
@@ -665,9 +829,11 @@ async def check_verification_code(
     channel_title = data.get("transfer_tg_channel_title", "Канал")
     
     if not code or not tg_channel:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await callback.message.edit_text(
             "❌ Ошибка: данные верификации утеряны. Начните заново.",
-            reply_markup=back_to_start_keyboard(),
+            reply_markup=builder.as_markup(),
         )
         await state.clear()
         return
@@ -1123,26 +1289,32 @@ async def _execute_transfer(
 
     if not tg_channel or not max_channel_id:
         error_text = "❌ Ошибка: данные канала утеряны. Начните заново."
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         if is_callback:
-            await message.edit_text(error_text, reply_markup=back_to_start_keyboard())
+            await message.edit_text(error_text, reply_markup=builder.as_markup())
         else:
-            await message.answer(error_text, reply_markup=back_to_start_keyboard())
+            await message.answer(error_text, reply_markup=builder.as_markup())
         await state.clear()
         return
 
     # Level 1: Check if user already has an active transfer
     if user_id in _active_transfers:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await (message.edit_text if is_callback else message.answer)(
             "⏳ Перенос уже выполняется, дождитесь завершения",
-            reply_markup=back_to_start_keyboard(),
+            reply_markup=builder.as_markup(),
         )
         return
 
     # Level 2: Check global limit
     if _transfer_semaphore.locked():
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await (message.edit_text if is_callback else message.answer)(
             "⏳ Сервер загружен, попробуйте через пару минут",
-            reply_markup=back_to_start_keyboard(),
+            reply_markup=builder.as_markup(),
         )
         return
 
@@ -1340,7 +1512,9 @@ async def _execute_transfer(
             f"• Бот «Репост» добавлен в канал Max\n"
             f"• Боту выданы права «Писать посты»"
         )
-        await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
+        await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=builder.as_markup())
 
     except RuntimeError as e:
         logger.error(f"Runtime error during transfer: {e}")
@@ -1351,7 +1525,9 @@ async def _execute_transfer(
             f"• Вы авторизовали Telethon (python scripts/auth_telethon.py)\n"
             f"• Файл user_session.session существует"
         )
-        await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
+        await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=builder.as_markup())
 
     except Exception as e:
         logger.error(f"Unexpected error during transfer: {e}")
@@ -1360,7 +1536,9 @@ async def _execute_transfer(
             f"Произошла непредвиденная ошибка.\n"
             f"Попробуйте позже или обратитесь в поддержку."
         )
-        await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
+        await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=builder.as_markup())
 
     finally:
         # Remove user from active transfers set and cleanup engine
@@ -1430,9 +1608,11 @@ async def enable_autopost_after_transfer(
     channel_title = data.get("transfer_tg_channel_title", "Канал")
     
     if not tg_channel or not max_channel_id:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await callback.message.edit_text(
             "❌ Данные переноса утеряны. Настройте автопостинг через меню.",
-            reply_markup=back_to_start_keyboard(),
+            reply_markup=builder.as_markup(),
         )
         return
     
@@ -1449,26 +1629,32 @@ async def enable_autopost_after_transfer(
         )
         
         if success:
+            builder = InlineKeyboardBuilder()
+            builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
             await callback.message.edit_text(
                 f"✅ <b>Автопостинг включён!</b>\n\n"
                 f"📺 Канал: {channel_title}\n\n"
                 f"Новые посты будут автоматически появляться в Max через несколько секунд.",
-                reply_markup=back_to_start_keyboard(),
+                reply_markup=builder.as_markup(),
             )
         else:
+            builder = InlineKeyboardBuilder()
+            builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
             await callback.message.edit_text(
                 f"⚠️ <b>Автопостинг уже активен</b>\n\n"
                 f"📺 Канал: {channel_title}\n\n"
                 f"Автопостинг для этого канала уже работает.",
-                reply_markup=back_to_start_keyboard(),
+                reply_markup=builder.as_markup(),
             )
         
     except Exception as e:
         logger.error(f"Failed to enable autopost: {e}")
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await callback.message.edit_text(
             "❌ Не удалось включить автопостинг.\n\n"
             "Попробуйте настроить через меню «⚡ Автопостинг».",
-            reply_markup=back_to_start_keyboard(),
+            reply_markup=builder.as_markup(),
         )
 
 
@@ -1532,6 +1718,8 @@ async def process_manual_chat_id(message: Message, state, db_session, user_repo)
     try:
         chat_id = int(text)
         if chat_id >= 0:
+            builder = InlineKeyboardBuilder()
+            builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
             await _edit_or_send_message(
                 message,
                 text="❌ <b>Некорректный chat_id</b>\n\n"
@@ -1539,10 +1727,12 @@ async def process_manual_chat_id(message: Message, state, db_session, user_repo)
                 "Пример: <code>-70977371223467</code>\n\n"
                 "Попробуйте снова:",
                 state=state,
-                reply_markup=back_keyboard(),
+                reply_markup=builder.as_markup(),
             )
             return
     except ValueError:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await _edit_or_send_message(
             message,
             text="❌ <b>Некорректный формат</b>\n\n"
@@ -1550,7 +1740,7 @@ async def process_manual_chat_id(message: Message, state, db_session, user_repo)
             "Пример: <code>-70977371223467</code>\n\n"
             "Попробуйте снова:",
             state=state,
-            reply_markup=back_keyboard(),
+            reply_markup=builder.as_markup(),
         )
         return
     
@@ -1625,13 +1815,15 @@ async def _continue_after_max_channel_set(
         post_count = await telethon.count_channel_posts(channel_username)
     except Exception as e:
         logger.error(f"Error counting posts: {e}")
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await _edit_or_send_message(
             target_message,
             text="❌ Не удалось подсчитать посты в канале.\n\n"
             f"Ошибка: {str(e)}\n\n"
             "Убедитесь, что канал публичный и бот имеет к нему доступ.",
             state=state,
-            reply_markup=back_keyboard(),
+            reply_markup=builder.as_markup(),
         )
         await state.clear()
         return
@@ -1804,6 +1996,8 @@ async def process_transfer_max_channel(message: Message, state, db_session, user
 
     except MaxAPIError as e:
         logger.error(f"Max API error: {e}")
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await _edit_or_send_message(
             message,
             text="❌ Ошибка подключения к Max API.\n\n"
@@ -1812,27 +2006,33 @@ async def process_transfer_max_channel(message: Message, state, db_session, user
             "• Боту выданы права «Писать посты»\n\n"
             "Попробуйте снова:",
             state=state,
-            reply_markup=back_keyboard(),
+            reply_markup=builder.as_markup(),
         )
         return
 
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await _edit_or_send_message(
             message,
             text="❌ Произошла ошибка. Попробуйте позже.",
             state=state,
-            reply_markup=back_keyboard(),
+            reply_markup=builder.as_markup(),
         )
         return
 
     if not max_channel_id:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="📝 Ввести chat_id вручную", callback_data="transfer_enter_chat_id")
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
+        builder.adjust(1)
         await _edit_or_send_message(
             message,
             text="❌ <b>Не удалось определить канал/чат</b>\n\n"
             "Попробуйте ввести chat_id вручную:",
             state=state,
-            reply_markup=_build_manual_chat_id_keyboard(),
+            reply_markup=builder.as_markup(),
         )
         return
 

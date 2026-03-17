@@ -36,8 +36,12 @@ async def show_channels_list(callback: CallbackQuery, user_repo, channel_repo) -
     user = await user_repo.get_by_telegram_id(callback.from_user.id)
 
     if user is None:
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await callback.message.edit_text(
             "❌ Пользователь не найден.",
+            reply_markup=builder.as_markup(),
         )
         await callback.answer()
         return
@@ -312,8 +316,12 @@ async def confirm_delete_channel(callback: CallbackQuery, user_repo, channel_rep
 
     if deleted:
         logger.info(f"Channel {channel_id} deleted by user {user.id}")
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await callback.message.edit_text(
             "✅ Канал удалён.",
+            reply_markup=builder.as_markup(),
         )
 
         # Show updated list after a brief delay

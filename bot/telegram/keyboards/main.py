@@ -8,16 +8,17 @@ def start_keyboard() -> InlineKeyboardMarkup:
     """
     Create start screen keyboard with main actions.
 
-    For first-time users - 3 main entry points.
+    For first-time users - 4 main entry points.
 
     Returns:
-        Inline keyboard with 3 buttons
+        Inline keyboard with 4 buttons
     """
     builder = InlineKeyboardBuilder()
 
     builder.button(text="📥 Настроить перенос", callback_data="start_setup_transfer")
     builder.button(text="🔄 Настроить автопостинг", callback_data="start_setup_autopost")
-    builder.button(text="✅ Проверить подписку", callback_data="start_check_sub")
+    builder.button(text="📋 Мои каналы", callback_data="menu_my_channels")
+    builder.button(text="🏠 Главное меню", callback_data="nav_goto_menu")
 
     builder.adjust(1)
     return builder.as_markup()

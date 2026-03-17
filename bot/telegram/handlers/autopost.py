@@ -192,9 +192,11 @@ async def check_admin_status(callback: CallbackQuery, state, bot) -> None:
     channel_title = data.get("tg_channel_title", "Канал")
 
     if not channel_id:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await callback.message.edit_text(
             "❌ Ошибка: данные канала утеряны. Начните заново.",
-            reply_markup=back_to_menu_keyboard(),
+            reply_markup=builder.as_markup(),
         )
         await callback.answer()
         await state.clear()
@@ -276,21 +278,25 @@ async def process_max_channel_link(message: Message, state) -> None:
 
     except MaxAPIError as e:
         logger.error(f"Max API error: {e}")
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await message.answer(
             "❌ Ошибка подключения к Max API.\n\n"
             "Убедитесь, что:\n"
             f"• Бот «Репост» ({MAX_BOT_USERNAME}) добавлен в канал\n"
             "• Боту выданы права «Писать посты»\n\n"
             "Попробуйте снова:",
-            reply_markup=back_to_menu_keyboard(),
+            reply_markup=builder.as_markup(),
         )
         return
 
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await message.answer(
             "❌ Произошла ошибка. Попробуйте позже.",
-            reply_markup=back_to_menu_keyboard(),
+            reply_markup=builder.as_markup(),
         )
         return
 
@@ -301,9 +307,11 @@ async def process_max_channel_link(message: Message, state) -> None:
     tg_channel_username = data.get("tg_channel_username", "")
 
     if not tg_channel_id:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await message.answer(
             "❌ Ошибка: данные канала утеряны. Начните заново.",
-            reply_markup=back_to_menu_keyboard(),
+            reply_markup=builder.as_markup(),
         )
         await state.clear()
         return

@@ -190,23 +190,6 @@ async def cmd_help(message: Message) -> None:
 
 
 # =============================================================================
-# Start Screen Callbacks
-# =============================================================================
-
-
-@start_router.callback_query(lambda c: c.data == "start_check_sub")
-async def callback_check_sub(callback: CallbackQuery) -> None:
-    """Handle 'Check subscription' button - placeholder."""
-    await callback.message.edit_text(
-        "<b>🚧 В разработке</b>\n\n"
-        "Функция проверки подписки будет доступна в ближайшее время.",
-        parse_mode="HTML",
-        reply_markup=back_to_menu_keyboard(),
-    )
-    await callback.answer()
-
-
-# =============================================================================
 # Menu Callbacks
 # =============================================================================
 # Note: start_setup_transfer and start_setup_autopost are handled by
