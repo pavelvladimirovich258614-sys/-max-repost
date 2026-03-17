@@ -1,6 +1,7 @@
 """Max API (VK) client for interacting with platform-api.max.ru."""
 
 import asyncio
+import json
 import os
 from dataclasses import dataclass
 from enum import Enum
@@ -392,7 +393,7 @@ class MaxClient:
         Listen for updates and find channel or chat chat_id.
 
         Uses long polling to wait for updates that contain channel or chat information.
-        Searches for events: bot_added, user_added, message_created in channels/chats.
+        Searches for events: bot_added, user_added, message_created, bot_started in channels/chats.
         Supports both "channel" and "chat" types.
 
         Args:
@@ -404,7 +405,7 @@ class MaxClient:
         params = {
             "timeout": timeout,
             "limit": 100,
-            "types": "bot_added,message_created,user_added"
+            "types": "bot_added,bot_started,message_created,message_callback,user_added"
         }
 
         logger.info(f"Polling /updates with timeout={timeout}s for chat_id (channel or chat)")
@@ -414,64 +415,123 @@ class MaxClient:
             updates = response.get("updates", [])
             logger.info(f"Received {len(updates)} updates")
 
+            # === DIAGNOSTIC: Log raw response (first 3000 chars) ===
+            try:
+                raw_json = json.dumps(response, indent=2, ensure_ascii=False)
+                logger.info(f"Raw /updates response: {raw_json[:3000]}")
+            except Exception as e:
+                logger.warning(f"Could not serialize response for logging: {e}")
+
             for update in updates:
-                logger.debug(f"Processing update: {update}")
+                update_type = update.get("update_type", "unknown")
+                logger.info(f"Processing update: type={update_type}, keys={list(update.keys())}")
 
-                # Try to extract chat_id from various update structures
-                # Case 1: bot_added or user_added - chat_id at top level
-                chat_id = update.get("chat_id")
-                if chat_id:
-                    chat = update.get("chat", {})
-                    chat_type = chat.get("type")
-                    # Support both channel and chat types
-                    if chat_type in ("channel", "chat") or update.get("is_channel"):
-                        logger.info(f"Found {chat_type} chat_id from chat event: {chat_id}")
-                        return int(chat_id)
-
-                # Case 2: message_created - chat info in message.recipient
+                # === DIAGNOSTIC: Detailed update structure logging ===
+                # Log message structure if present
                 message = update.get("message", {})
                 if message:
-                    recipient = message.get("recipient", {})
-                    chat_type = recipient.get("chat_type")
-                    if chat_type in ("channel", "chat"):
-                        chat_id = recipient.get("chat_id")
-                        if chat_id:
-                            logger.info(f"Found {chat_type} chat_id from message recipient: {chat_id}")
-                            return int(chat_id)
-                    
-                    # Also check message.chat_id directly
-                    msg_chat_id = message.get("chat_id")
-                    if msg_chat_id:
-                        logger.info(f"Found chat_id from message.chat_id: {msg_chat_id}")
-                        return int(msg_chat_id)
+                    logger.info(f"Message keys: {list(message.keys())}")
+                    logger.info(f"Message recipient: {message.get('recipient')}")
+                    logger.info(f"Message chat_id: {message.get('chat_id')}")
+                    logger.info(f"Message sender: {message.get('sender')}")
+                    chat_obj = message.get("chat")
+                    if chat_obj:
+                        logger.info(f"Chat object: {chat_obj}")
 
-                    # Alternative: message.chat structure
-                    chat = message.get("chat", {})
-                    chat_type = chat.get("type")
-                    if chat_type in ("channel", "chat"):
-                        chat_id = chat.get("id")
-                        if chat_id:
-                            logger.info(f"Found {chat_type} chat_id from message.chat: {chat_id}")
-                            return int(chat_id)
+                # Log update-level chat_id
+                if "chat_id" in update:
+                    logger.info(f"Update-level chat_id: {update['chat_id']}")
 
-                # Case 3: Direct chat object in update
-                chat = update.get("chat", {})
-                chat_type = chat.get("type")
-                if chat_type in ("channel", "chat"):
-                    chat_id = chat.get("id")
+                # === PARSING: Extract chat_id from various structures ===
+                chat_id = None
+                chat_type = None
+
+                # PRIORITY 1: bot_added event - bot was added to a channel/chat
+                if update_type == "bot_added":
+                    chat_id = update.get("chat_id")
+                    chat = update.get("chat", {})
+                    chat_type = chat.get("type") or update.get("chat_type")
                     if chat_id:
-                        logger.info(f"Found {chat_type} chat_id from update.chat: {chat_id}")
+                        logger.info(f"Found chat_id from bot_added event: {chat_id}, type: {chat_type}")
                         return int(chat_id)
+
+                # PRIORITY 2: bot_started event - user started bot in a chat
+                if update_type == "bot_started":
+                    chat_id = update.get("chat_id")
+                    chat = update.get("chat", {})
+                    chat_type = chat.get("type")
+                    if chat_id:
+                        logger.info(f"Found chat_id from bot_started event: {chat_id}, type: {chat_type}")
+                        return int(chat_id)
+
+                # PRIORITY 3: message.recipient.chat_id (standard format for messages)
+                if not chat_id and message:
+                    recipient = message.get("recipient", {})
+                    if recipient.get("chat_id"):
+                        chat_id = recipient["chat_id"]
+                        chat_type = recipient.get("chat_type")
+                        logger.info(f"Found chat_id from message.recipient: {chat_id}, type: {chat_type}")
+
+                # PRIORITY 4: message.chat_id (direct field)
+                if not chat_id and message:
+                    if message.get("chat_id"):
+                        chat_id = message["chat_id"]
+                        logger.info(f"Found chat_id from message.chat_id: {chat_id}")
+
+                # PRIORITY 5: message.chat.chat_id or message.chat.id (nested chat object)
+                if not chat_id and message:
+                    msg_chat = message.get("chat", {})
+                    if msg_chat.get("chat_id"):
+                        chat_id = msg_chat["chat_id"]
+                        chat_type = msg_chat.get("type")
+                        logger.info(f"Found chat_id from message.chat.chat_id: {chat_id}, type: {chat_type}")
+                    elif msg_chat.get("id"):
+                        chat_id = msg_chat["id"]
+                        chat_type = msg_chat.get("type")
+                        logger.info(f"Found chat_id from message.chat.id: {chat_id}, type: {chat_type}")
+
+                # PRIORITY 6: update-level chat_id (user_added, etc.)
+                if not chat_id:
+                    if update.get("chat_id"):
+                        chat_id = update["chat_id"]
+                        chat_type = update.get("chat", {}).get("type")
+                        logger.info(f"Found chat_id from update-level: {chat_id}, type: {chat_type}")
+
+                # PRIORITY 7: message.body.chat_id (some update types)
+                if not chat_id and message:
+                    body = message.get("body", {})
+                    if body.get("chat_id"):
+                        chat_id = body["chat_id"]
+                        logger.info(f"Found chat_id from message.body.chat_id: {chat_id}")
+
+                # === VALIDATION: Check if found chat_id is valid ===
+                if chat_id:
+                    # Determine type if not already set
+                    if not chat_type:
+                        chat_type = (
+                            recipient.get("chat_type") if message else None
+                            or message.get("chat", {}).get("type") if message else None
+                            or update.get("chat_type")
+                            or update.get("chat", {}).get("type")
+                            or "unknown"
+                        )
+
+                    # Accept both "channel" and "chat" types (reject "dialog" = DM)
+                    if chat_type in ("channel", "chat") or update.get("is_channel"):
+                        logger.info(f"✅ Found valid {chat_type} chat_id: {chat_id}")
+                        return int(chat_id)
+                    else:
+                        logger.info(f"Found chat_id {chat_id} but type '{chat_type}' is not channel/chat, skipping")
+
+            logger.info("No valid channel or chat chat_id found in any updates")
+            return None
 
         except MaxAPIError as e:
             logger.error(f"Max API error while finding chat: {e}")
             raise
         except Exception as e:
-            logger.error(f"Unexpected error finding chat: {e}")
+            logger.error(f"Unexpected error finding chat: {e}", exc_info=True)
             return None
-
-        logger.info("No channel or chat chat_id found in updates")
-        return None
 
     async def send_message(
         self,
