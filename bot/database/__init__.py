@@ -12,6 +12,7 @@ from bot.database.models import (
     Log,
     MaxChannelBinding,
     VerifiedChannel,
+    TransferredPost,
     PostStatus,
     PaymentStatus,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "Log",
     "MaxChannelBinding",
     "VerifiedChannel",
+    "TransferredPost",
     "PostStatus",
     "PaymentStatus",
 ]

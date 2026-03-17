@@ -1041,6 +1041,7 @@ async def _execute_transfer(
     state,
     count: int | str,
     is_callback: bool = False,
+    db_session=None,
 ) -> None:
     """
     Execute the actual transfer process.
@@ -1050,8 +1051,12 @@ async def _execute_transfer(
         state: FSM state
         count: Number of posts to transfer or "all"
         is_callback: Whether message comes from callback query
+        db_session: Optional database session for duplicate tracking
     """
+    import asyncio
+    
     data = await state.get_data()
+    user_id = data.get("user_id")
     tg_channel = data.get("transfer_tg_channel_username", "")
     max_channel_id = data.get("transfer_max_channel_id", "")
     
@@ -1072,51 +1077,53 @@ async def _execute_transfer(
     # Show initial progress message
     count_text = "Все посты" if count == "all" else f"{count} постов"
     progress_message = await (message.answer if not is_callback else message.edit_text)(
-        f"⏳ Запускаю перенос...\n\n"
-        f"Канал: {channel_title}\n"
-        f"Выбрано: {count_text}\n\n"
-        f"Подготовка...",
+        f"🚀 <b>Перенос запущен!</b>\n\n"
+        f"📺 Канал: {channel_title}\n"
+        f"📝 Выбрано: {count_text}\n\n"
+        f"⏳ Подготовка...",
         parse_mode="HTML",
     )
 
-    # Create progress callback with throttling
-    last_update_time = 0
-    UPDATE_INTERVAL = 3.0  # Minimum seconds between updates
+    # Create progress callback with progress bar
+    posts_since_update = 0
+    UPDATE_EVERY = 3  # Update every 3 posts to avoid rate limits
+
+    def build_progress_bar(current: int, total: int) -> str:
+        """Build a 10-character progress bar."""
+        if total == 0:
+            return "░░░░░░░░░░"
+        filled = round(current / total * 10)
+        return "█" * filled + "░" * (10 - filled)
 
     async def progress_callback(current: int, total: int, success: int, failed: int, skipped: int) -> None:
-        nonlocal last_update_time
-        current_time = time.time()
-
-        # Throttle updates to avoid FloodWait
-        if current_time - last_update_time < UPDATE_INTERVAL:
+        nonlocal posts_since_update
+        posts_since_update += 1
+        
+        # Update every N posts
+        if posts_since_update < UPDATE_EVERY and current < total:
             return
-
-        last_update_time = current_time
+        posts_since_update = 0
+        
         percent = int((current / total) * 100) if total > 0 else 0
+        bar = build_progress_bar(current, total)
+        
+        # Calculate estimated time remaining (rough estimate: ~2 seconds per post)
+        remaining_posts = total - current
+        eta_seconds = remaining_posts * 2
+        if eta_seconds > 60:
+            eta_text = f"~{eta_seconds // 60} мин осталось"
+        else:
+            eta_text = f"~{eta_seconds} сек осталось"
 
         try:
-            if is_callback:
-                await progress_message.edit_text(
-                    f"⏳ <b>Перенос в процессе</b>\n\n"
-                    f"Канал: {channel_title}\n"
-                    f"Прогресс: {current}/{total} ({percent}%)\n\n"
-                    f"✅ Успешно: {success}\n"
-                    f"❌ Ошибок: {failed}\n"
-                    f"⏭ Пропущено: {skipped}",
-                    parse_mode="HTML",
-                )
-            else:
-                # For message handlers, we need to send new messages
-                # (editing is more complex due to message_id differences)
-                await progress_message.edit_text(
-                    f"⏳ <b>Перенос в процессе</b>\n\n"
-                    f"Канал: {channel_title}\n"
-                    f"Прогресс: {current}/{total} ({percent}%)\n\n"
-                    f"✅ Успешно: {success}\n"
-                    f"❌ Ошибок: {failed}\n"
-                    f"⏭ Пропущено: {skipped}",
-                    parse_mode="HTML",
-                )
+            await progress_message.edit_text(
+                f"🚀 <b>Перенос в процессе!</b>\n\n"
+                f"📺 Канал: {channel_title}\n"
+                f"📊 Прогресс: {bar} {percent}%\n"
+                f"📤 Перенесено: {current} из {total}\n"
+                f"⏱ {eta_text}",
+                parse_mode="HTML",
+            )
         except Exception as e:
             logger.warning(f"Failed to update progress message: {e}")
 
@@ -1130,11 +1137,14 @@ async def _execute_transfer(
         )
         max_client = MaxClient()
 
-        # Create engine
+        # Create engine with duplicate tracking
         engine = TransferEngine(
             telethon_client=telethon,
             max_api_client=max_client,
-            db_session=None,  # No DB session needed for one-time transfer
+            db_session=db_session,
+            user_id=user_id,
+            tg_channel=tg_channel,
+            max_channel_id=max_channel_id,
         )
 
         # Run transfer
@@ -1148,47 +1158,59 @@ async def _execute_transfer(
         # Close clients
         await max_client.close()
 
-        # Show final result
-        result_text = (
+        # Send completion sticker
+        try:
+            sticker_msg = await message.answer_sticker(
+                "CAACAgIAAxkBAAIhNGm5D520AuBBSj9fz9ldxq6Xj0WbAAIzTwACbtpISK7t5RKVOC4NOgQ"
+            )
+            await asyncio.sleep(5)
+            try:
+                await sticker_msg.delete()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"Could not send sticker: {e}")
+
+        # Build final result message
+        result_lines = [
             f"✅ <b>Перенос завершён!</b>\n\n"
-            f"Канал: {channel_title}\n\n"
-            f"📊 <b>Статистика:</b>\n"
-            f"Всего обработано: {result.total}\n"
-            f"✅ Успешно: {result.success}\n"
-            f"❌ Ошибок: {result.failed}\n"
-            f"⏭ Пропущено: {result.skipped}"
+            f"📺 Канал: {channel_title}\n"
+            f"✅ Перенесено: {result.success} постов"
+        ]
+        
+        # Show errors only if > 0
+        if result.failed > 0:
+            result_lines.append(f"❌ Ошибок: {result.failed}")
+        
+        # Show duplicates only if > 0
+        if result.duplicates > 0:
+            result_lines.append(f"🔄 Дубликатов пропущено: {result.duplicates}")
+        
+        result_text = "\n".join(result_lines)
+        
+        # Add prompt for autoposting
+        result_text += "\n\n⚡ Хотите настроить автопостинг новых постов?"
+
+        # Create keyboard with autopost options
+        builder = InlineKeyboardBuilder()
+        builder.button(text="⚡ Подключить автопостинг", callback_data="menu_new_autopost")
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
+        builder.adjust(1)
+
+        await progress_message.edit_text(
+            result_text,
+            parse_mode="HTML",
+            reply_markup=builder.as_markup(),
         )
-
-        if result.errors:
-            error_summary = "\n\n".join(
-                f"• Пост {e.post_id}: {_strip_html(e.error_message, 100)}"
-                for e in result.errors[:3]  # Show first 3 errors
-            )
-            if len(result.errors) > 3:
-                error_summary += f"\n• и ещё {len(result.errors) - 3} ошибок"
-            result_text += f"\n\n❌ <b>Ошибки:</b>\n{error_summary}"
-
-        if is_callback:
-            await progress_message.edit_text(
-                result_text,
-                parse_mode="HTML",
-                reply_markup=transfer_complete_keyboard(),
-            )
-        else:
-            await progress_message.edit_text(
-                result_text,
-                parse_mode="HTML",
-                reply_markup=transfer_complete_keyboard(),
-            )
 
         logger.info(
             f"Transfer completed: {result.success} success, "
-            f"{result.failed} failed, {result.skipped} skipped"
+            f"{result.failed} failed, {result.skipped} skipped, "
+            f"{result.duplicates} duplicates"
         )
 
     except MaxAPIError as e:
         logger.error(f"Max API error during transfer: {e}")
-        # Clean error message - remove HTML tags
         clean_error = _strip_html(str(e))
         error_text = (
             f"❌ <b>Ошибка переноса</b>\n\n"
@@ -1198,10 +1220,7 @@ async def _execute_transfer(
             f"• Бот «Репост» добавлен в канал Max\n"
             f"• Боту выданы права «Писать посты»"
         )
-        if is_callback:
-            await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
-        else:
-            await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
+        await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
 
     except RuntimeError as e:
         logger.error(f"Runtime error during transfer: {e}")
@@ -1212,10 +1231,7 @@ async def _execute_transfer(
             f"• Вы авторизовали Telethon (python scripts/auth_telethon.py)\n"
             f"• Файл user_session.session существует"
         )
-        if is_callback:
-            await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
-        else:
-            await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
+        await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
 
     except Exception as e:
         logger.error(f"Unexpected error during transfer: {e}")
@@ -1224,10 +1240,7 @@ async def _execute_transfer(
             f"Произошла непредвиденная ошибка.\n"
             f"Попробуйте позже или обратитесь в поддержку."
         )
-        if is_callback:
-            await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
-        else:
-            await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
+        await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
 
     finally:
         await state.clear()
@@ -1573,13 +1586,18 @@ async def process_transfer_max_channel(message: Message, state, db_session) -> N
 
 
 @transfer_router.callback_query(StateFilter(TransferStates.transfer_select_count))
-async def process_post_count_selection(callback: CallbackQuery, state) -> None:
+async def process_post_count_selection(
+    callback: CallbackQuery,
+    state,
+    db_session,
+) -> None:
     """
     Process user's selection of post count and start transfer.
 
     Args:
         callback: Callback query with selection
         state: FSM state
+        db_session: Database session for duplicate tracking
     """
     if callback.data == "transfer_cancel":
         await state.clear()
@@ -1611,7 +1629,7 @@ async def process_post_count_selection(callback: CallbackQuery, state) -> None:
         return
 
     await callback.answer()
-    await _execute_transfer(callback.message, state, count, is_callback=True)
+    await _execute_transfer(callback.message, state, count, is_callback=True, db_session=db_session)
 
 
 # =============================================================================
@@ -1620,13 +1638,18 @@ async def process_post_count_selection(callback: CallbackQuery, state) -> None:
 
 
 @transfer_router.message(StateFilter(TransferStates.transfer_select_count))
-async def process_custom_post_count(message: Message, state) -> None:
+async def process_custom_post_count(
+    message: Message,
+    state,
+    db_session,
+) -> None:
     """
     Process custom post count input and start transfer.
 
     Args:
         message: User message with number
         state: FSM state
+        db_session: Database session for duplicate tracking
     """
     # Delete user message
     await _delete_user_message(message)
@@ -1646,4 +1669,4 @@ async def process_custom_post_count(message: Message, state) -> None:
         )
         return
 
-    await _execute_transfer(message, state, count, is_callback=False)
+    await _execute_transfer(message, state, count, is_callback=False, db_session=db_session)

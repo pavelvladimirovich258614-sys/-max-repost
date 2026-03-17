@@ -458,6 +458,60 @@ class VerifiedChannel(Base):
         return f"<VerifiedChannel(user_id={self.user_id}, tg={self.tg_channel})>"
 
 
+class TransferredPost(Base):
+    """
+    Track transferred posts to prevent duplicates.
+    
+    When a post is transferred from TG to Max, record it here.
+    On subsequent transfers, skip already-transferred posts.
+    
+    Attributes:
+        id: Primary key
+        user_id: Telegram user ID who performed the transfer
+        tg_channel: Telegram channel username
+        max_chat_id: Max channel chat_id (as string)
+        tg_message_id: Telegram message ID that was transferred
+        transferred_at: When the transfer occurred
+    """
+    
+    __tablename__ = "transferred_posts"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        index=True,
+    )
+    tg_channel: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        index=True,
+    )
+    max_chat_id: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        index=True,
+    )
+    tg_message_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+    transferred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    
+    # Unique constraint: one record per post per channel combination
+    __table_args__ = (
+        UniqueConstraint("tg_channel", "max_chat_id", "tg_message_id", name="uq_transferred_post"),
+        Index("ix_transferred_posts_lookup", "tg_channel", "max_chat_id", "tg_message_id"),
+    )
+    
+    def __repr__(self) -> str:
+        return f"<TransferredPost(tg={self.tg_channel}, msg_id={self.tg_message_id}, max={self.max_chat_id})>"
+
+
 class Log(Base):
     """
     Audit log for user actions.

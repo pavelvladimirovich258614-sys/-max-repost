@@ -47,6 +47,7 @@ from telethon.tl.types import (
 )
 
 from bot.max_api.client import MaxClient, MaxAPIError, RateLimitError
+from bot.database.repositories.transferred_post import TransferredPostRepository
 
 
 def split_text(text: str, max_length: int = 4000) -> list[str]:
@@ -210,7 +211,8 @@ class TransferResult:
     total: int  # Total posts to transfer
     success: int  # Successfully transferred
     failed: int  # Failed to transfer
-    skipped: int  # Skipped (unsupported types)
+    skipped: int  # Skipped (unsupported types, empty messages)
+    duplicates: int = 0  # Already transferred (skipped to prevent duplicates)
     errors: list[TransferError] = field(default_factory=list)
 
     @property
@@ -218,7 +220,7 @@ class TransferResult:
         """Calculate completion percentage."""
         if self.total == 0:
             return 0
-        completed = self.success + self.failed + self.skipped
+        completed = self.success + self.failed + self.skipped + self.duplicates
         return int((completed / self.total) * 100)
 
 
@@ -381,6 +383,9 @@ class TransferEngine:
         telethon_client,
         max_api_client: MaxClient,
         db_session=None,
+        user_id: int | None = None,
+        tg_channel: str | None = None,
+        max_channel_id: str | None = None,
     ):
         """
         Initialize the transfer engine.
@@ -389,11 +394,22 @@ class TransferEngine:
             telethon_client: TelethonChannelClient instance
             max_api_client: MaxClient instance
             db_session: Optional SQLAlchemy session for tracking
+            user_id: Telegram user ID for duplicate tracking
+            tg_channel: Telegram channel username for duplicate tracking
+            max_channel_id: Max channel ID for duplicate tracking
         """
         self.telethon = telethon_client
         self.max_client = max_api_client
         self.db_session = db_session
+        self.user_id = user_id
+        self.tg_channel = tg_channel
+        self.max_channel_id = str(max_channel_id) if max_channel_id else None
+        self._transferred_repo: TransferredPostRepository | None = None
         self._abort_flag = False
+        
+        # Initialize repository if db_session is provided
+        if db_session:
+            self._transferred_repo = TransferredPostRepository(db_session)
 
     async def transfer_posts(
         self,
@@ -445,6 +461,22 @@ class TransferEngine:
 
                 result.total += 1
 
+                # Check if post was already transferred (duplicate protection)
+                if self._transferred_repo and self.user_id:
+                    max_chat_id_str = str(max_channel_id)
+                    is_duplicate = await self._transferred_repo.is_post_transferred(
+                        tg_channel=tg_channel,
+                        max_chat_id=max_chat_id_str,
+                        tg_message_id=message.id,
+                    )
+                    if is_duplicate:
+                        result.duplicates += 1
+                        logger.info(f"Skipping post {message.id}: reason=already_transferred")
+                        await self._notify_progress(
+                            progress_callback, result, message.id, "already_transferred"
+                        )
+                        continue
+
                 # Check if we should skip this message
                 should_skip, skip_reason = should_skip_message(message)
                 if should_skip:
@@ -486,6 +518,14 @@ class TransferEngine:
                         # Album counts as one transfer operation
                         result.success += 1
                         logger.info(f"Transferred album {message.grouped_id}")
+                        # Record transfer for duplicate protection
+                        if self._transferred_repo and self.user_id:
+                            await self._transferred_repo.record_transfer(
+                                user_id=self.user_id,
+                                tg_channel=tg_channel,
+                                max_chat_id=str(max_channel_id),
+                                tg_message_id=message.id,
+                            )
                     else:
                         # Single post
                         await self._transfer_single_post(
@@ -494,6 +534,14 @@ class TransferEngine:
                         )
                         result.success += 1
                         logger.info(f"Transferred post {message.id}")
+                        # Record transfer for duplicate protection
+                        if self._transferred_repo and self.user_id:
+                            await self._transferred_repo.record_transfer(
+                                user_id=self.user_id,
+                                tg_channel=tg_channel,
+                                max_chat_id=str(max_channel_id),
+                                tg_message_id=message.id,
+                            )
 
                     # Reset consecutive errors on success
                     consecutive_errors = 0
@@ -856,7 +904,7 @@ class TransferEngine:
         """
         if callback:
             try:
-                completed = result.success + result.failed + result.skipped
+                completed = result.success + result.failed + result.skipped + result.duplicates
                 await callback(
                     current=completed,
                     total=result.total,
