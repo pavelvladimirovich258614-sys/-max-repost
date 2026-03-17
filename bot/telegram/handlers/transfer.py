@@ -21,7 +21,9 @@ from bot.telegram.keyboards.transfer import (
     transfer_complete_keyboard,
     saved_max_channels_keyboard,
     confirm_delete_binding_keyboard,
+    verify_code_keyboard,
 )
+from bot.core.verification import generate_verification_code, verify_channel_ownership
 from bot.max_api.client import MaxClient, MaxAPIError
 from bot.core.telethon_client import get_telethon_client
 from bot.core.transfer_engine import TransferEngine, TransferResult
@@ -281,8 +283,8 @@ async def process_transfer_tg_channel(message: Message, state, bot) -> None:
         )
         await state.set_state(TransferStates.transfer_waiting_verification)
     else:
-        # Bot is already admin - skip to Max connection
-        await _show_max_connection_instructions(message, state, chat.title)
+        # Bot is already admin - proceed to ownership verification
+        await _show_verification_code(message, state, chat.title)
 
 
 def _build_continue_keyboard() -> InlineKeyboardMarkup:
@@ -292,6 +294,42 @@ def _build_continue_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
     builder.adjust(1)
     return builder.as_markup()
+
+
+async def _show_verification_code(
+    target_message: Message | CallbackQuery,
+    state,
+    channel_title: str,
+) -> None:
+    """
+    Show verification code for channel ownership confirmation.
+    
+    Args:
+        target_message: Message or CallbackQuery to edit
+        state: FSM state
+        channel_title: Telegram channel title
+    """
+    # Generate verification code
+    code = generate_verification_code()
+    await state.update_data(verification_code=code)
+    
+    text = (
+        f"<b>🔐 Подтверждение прав владения</b>\n\n"
+        f"Канал: <b>{channel_title}</b>\n\n"
+        f"Для подтверждения что вы владелец канала:\n"
+        f"1. Откройте настройки Telegram-канала\n"
+        f"2. Перейдите в раздел «Описание»\n"
+        f"3. Вставьте код: <code>{code}</code>\n"
+        f"4. Нажмите «Проверить» ниже\n\n"
+        f"⚠️ Код можно удалить сразу после проверки."
+    )
+    
+    await _edit_or_send_message(
+        target_message, state,
+        text=text,
+        reply_markup=verify_code_keyboard(),
+    )
+    await state.set_state(TransferStates.transfer_verify_code)
 
 
 @transfer_router.callback_query(lambda c: c.data == "transfer_verify_admin", StateFilter(TransferStates.transfer_waiting_verification))
@@ -325,8 +363,8 @@ async def verify_admin_after_prompt(callback: CallbackQuery, state, bot) -> None
         from aiogram.enums import ChatMemberStatus
 
         if member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
-            # Bot is admin - proceed to Max setup
-            await _show_max_connection_instructions(callback.message, state, channel_title)
+            # Bot is admin - proceed to ownership verification
+            await _show_verification_code(callback.message, state, channel_title)
         else:
             await callback.answer("❌ Бот ещё не добавлен в администраторы.", show_alert=True)
 
@@ -416,6 +454,126 @@ async def _show_max_connection_instructions(
         )
 
         await state.set_state(TransferStates.transfer_waiting_max_channel)
+
+
+# =============================================================================
+# Channel Ownership Verification Handlers
+# =============================================================================
+
+
+@transfer_router.callback_query(lambda c: c.data == "verify_check", StateFilter(TransferStates.transfer_verify_code))
+async def check_verification_code(callback: CallbackQuery, state) -> None:
+    """
+    Check if verification code is present in channel description.
+    
+    Args:
+        callback: Callback query
+        state: FSM state
+    """
+    data = await state.get_data()
+    code = data.get("verification_code")
+    tg_channel = data.get("transfer_tg_channel_username")
+    channel_title = data.get("transfer_tg_channel_title", "Канал")
+    
+    if not code or not tg_channel:
+        await callback.message.edit_text(
+            "❌ Ошибка: данные верификации утеряны. Начните заново.",
+            reply_markup=back_to_start_keyboard(),
+        )
+        await callback.answer()
+        await state.clear()
+        return
+    
+    try:
+        # Get Telethon client
+        telethon = get_telethon_client(
+            api_id=settings.telegram_api_id,
+            api_hash=settings.telegram_api_hash,
+            phone=settings.telegram_phone,
+        )
+        
+        # Verify code in channel description
+        is_verified = await verify_channel_ownership(telethon, tg_channel, code)
+        
+        if is_verified:
+            await callback.answer("✅ Права подтверждены!", show_alert=True)
+            logger.info(f"Channel {tg_channel} ownership verified for user {callback.from_user.id}")
+            # Proceed to Max channel selection
+            await _show_max_connection_instructions(callback.message, state, channel_title)
+        else:
+            await callback.answer("❌ Код не найден", show_alert=True)
+            await callback.message.edit_text(
+                f"<b>🔐 Подтверждение прав владения</b>\n\n"
+                f"Канал: <b>{channel_title}</b>\n\n"
+                f"❌ <b>Код не найден в описании канала.</b>\n\n"
+                f"Убедитесь что код <code>{code}</code> добавлен в описание и попробуйте снова.\n\n"
+                f"Инструкция:\n"
+                f"1. Откройте настройки Telegram-канала\n"
+                f"2. Перейдите в раздел «Описание»\n"
+                f"3. Вставьте код: <code>{code}</code>\n"
+                f"4. Нажмите «Проверить» ниже\n\n"
+                f"⚠️ Код можно удалить сразу после проверки.",
+                reply_markup=verify_code_keyboard(),
+            )
+            
+    except Exception as e:
+        logger.error(f"Error verifying channel ownership: {e}")
+        await callback.answer("❌ Ошибка проверки. Попробуйте снова.", show_alert=True)
+
+
+@transfer_router.callback_query(lambda c: c.data == "verify_new_code", StateFilter(TransferStates.transfer_verify_code))
+async def generate_new_verification_code(callback: CallbackQuery, state) -> None:
+    """
+    Generate new verification code.
+    
+    Args:
+        callback: Callback query
+        state: FSM state
+    """
+    data = await state.get_data()
+    channel_title = data.get("transfer_tg_channel_title", "Канал")
+    
+    # Generate new code
+    code = generate_verification_code()
+    await state.update_data(verification_code=code)
+    
+    await callback.message.edit_text(
+        f"<b>🔐 Подтверждение прав владения</b>\n\n"
+        f"Канал: <b>{channel_title}</b>\n\n"
+        f"<b>Новый код сгенерирован!</b>\n\n"
+        f"Для подтверждения что вы владелец канала:\n"
+        f"1. Откройте настройки Telegram-канала\n"
+        f"2. Перейдите в раздел «Описание»\n"
+        f"3. Вставьте код: <code>{code}</code>\n"
+        f"4. Нажмите «Проверить» ниже\n\n"
+        f"⚠️ Код можно удалить сразу после проверки.",
+        reply_markup=verify_code_keyboard(),
+    )
+    await callback.answer("🔄 Новый код сгенерирован")
+
+
+@transfer_router.callback_query(lambda c: c.data == "verify_back", StateFilter(TransferStates.transfer_verify_code))
+async def back_from_verification(callback: CallbackQuery, state) -> None:
+    """
+    Go back from verification to TG channel input.
+    
+    Args:
+        callback: Callback query
+        state: FSM state
+    """
+    await callback.message.edit_text(
+        "<b>🔗 Пришлите ссылку на ваш Telegram-канал</b>\n\n"
+        "Мы выполним перенос постов в 4 этапа:\n"
+        "1. <b>Анализ</b>: Посчитаем количество постов.\n"
+        "2. <b>Расчёт</b>: Определим стоимость переноса.\n"
+        "3. <b>Подключение</b>: Настроим связь с MAX.\n"
+        "4. <b>Запуск</b>: Начнём перенос контента.\n\n"
+        "👉 Отправьте ссылку на ваш публичный Telegram-канал:\n"
+        "<i>https://t.me/channelname</i>",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+    await state.set_state(TransferStates.transfer_waiting_tg_channel)
 
 
 # =============================================================================

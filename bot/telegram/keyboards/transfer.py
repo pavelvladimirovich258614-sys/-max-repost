@@ -184,3 +184,18 @@ def transfer_complete_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="⏭ Готово → меню", callback_data="nav_goto_menu")
     return builder.as_markup()
+
+
+def verify_code_keyboard() -> InlineKeyboardMarkup:
+    """
+    Create keyboard for channel ownership verification.
+
+    Returns:
+        Inline keyboard with check, new code, and back buttons
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Проверить", callback_data="verify_check")
+    builder.button(text="🔄 Новый код", callback_data="verify_new_code")
+    builder.button(text="↩️ Назад", callback_data="verify_back")
+    builder.adjust(1)
+    return builder.as_markup()

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 from telethon import TelegramClient
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage
+from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.errors import SessionPasswordNeededError
 from loguru import logger
 
@@ -110,6 +111,33 @@ class TelethonChannelClient:
             await self._client.disconnect()
             self._client = None
             logger.info("Telethon client disconnected")
+
+    async def get_channel_description(self, channel: str) -> str:
+        """
+        Get channel description (about) via Telethon.
+
+        Args:
+            channel: Channel username (with or without @) or channel ID
+
+        Returns:
+            Channel description string or empty string if not available
+
+        Raises:
+            Exception: If channel cannot be accessed
+        """
+        client = await self._get_client()
+
+        # Normalize channel identifier
+        if channel.startswith('@'):
+            channel = channel[1:]
+
+        try:
+            entity = await client.get_entity(channel)
+            full = await client(GetFullChannelRequest(entity))
+            return full.full_chat.about or ""
+        except Exception as e:
+            logger.error(f"Error getting channel description for {channel}: {e}")
+            raise
 
     async def count_channel_posts(self, channel_username: str) -> int:
         """

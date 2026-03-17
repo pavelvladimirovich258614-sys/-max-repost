@@ -15,7 +15,8 @@ class TransferStates(StatesGroup):
     """States for post transfer setup flow."""
 
     transfer_waiting_tg_channel = State()  # Waiting for TG channel link
-    transfer_waiting_verification = State()  # Waiting for channel verification
+    transfer_waiting_verification = State()  # Waiting for channel verification (bot admin check)
+    transfer_verify_code = State()  # Waiting for ownership verification via code
     transfer_select_saved_max = State()  # Selecting from saved Max channels
     transfer_waiting_max_channel = State()  # Waiting for Max channel link
     transfer_detect_max_channel = State()  # Auto-detecting Max channel ID via updates
