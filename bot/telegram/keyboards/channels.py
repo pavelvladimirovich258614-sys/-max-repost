@@ -27,7 +27,7 @@ def channels_list_keyboard(channels: list[dict]) -> InlineKeyboardMarkup:
     # Add action buttons
     builder.button(text="➕ Новый перенос", callback_data="menu_new_transfer")
     builder.button(text="🔄 Новый автопостинг", callback_data="menu_new_autopost")
-    builder.button(text="↩️ В меню", callback_data="nav_goto_menu")
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
 
     # Adjust: channels in rows of 1, actions in rows of 1
     if channels:
@@ -48,7 +48,7 @@ def no_channels_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="➕ Новый перенос", callback_data="menu_new_transfer")
     builder.button(text="🔄 Новый автопостинг", callback_data="menu_new_autopost")
-    builder.button(text="↩️ В меню", callback_data="nav_goto_menu")
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -75,9 +75,10 @@ def channel_settings_keyboard(channel_id: int, auto_repost: bool) -> InlineKeybo
     builder.button(text="📥 Начать перенос", callback_data=f"channel_transfer_{channel_id}")
     builder.button(text="🔧 Настроить фильтры", callback_data=f"channel_filters_{channel_id}")
     builder.button(text="🔍 Проверить TG", callback_data=f"channel_check_tg_{channel_id}")
-    builder.button(text="🔍 Проверить MAX", callback_data=f"channel_check_max_{channel_id}")
+    builder.button(text="🔍 Проверить Max", callback_data=f"channel_check_max_{channel_id}")
     builder.button(text="🗑 Удалить канал", callback_data=f"channel_delete_{channel_id}")
     builder.button(text="↩️ К списку каналов", callback_data="menu_channels")
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
 
     builder.adjust(1)
     return builder.as_markup()
@@ -96,5 +97,6 @@ def delete_confirm_keyboard(channel_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Да, удалить", callback_data=f"channel_delete_confirm_{channel_id}")
     builder.button(text="❌ Отмена", callback_data=f"channel_cancel_delete_{channel_id}")
-    builder.adjust(2)
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
+    builder.adjust(2, 1)
     return builder.as_markup()

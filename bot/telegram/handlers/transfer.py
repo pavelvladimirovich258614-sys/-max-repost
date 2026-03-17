@@ -197,6 +197,9 @@ async def start_transfer_setup(callback: CallbackQuery, state) -> None:
         callback: Callback query
         state: FSM state
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     # Store user_id and chat_id in state for later use
     await state.update_data(
         user_id=callback.from_user.id,
@@ -216,7 +219,6 @@ async def start_transfer_setup(callback: CallbackQuery, state) -> None:
         parse_mode="HTML",
         reply_markup=back_keyboard(),
     )
-    await callback.answer()
 
     # Set FSM state
     await state.set_state(TransferStates.transfer_waiting_tg_channel)
@@ -271,8 +273,9 @@ async def show_my_verified_channels(
             # Add new channel button
             builder.button(text="➕ Добавить новый канал", callback_data="start_setup_transfer")
             builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+            builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
             
-            # Adjust layout: 2 columns for channels+delete, then 1 column for bottom buttons
+            # Adjust layout: 2 columns for channels+delete, then 1 column for new channel, then 2 columns for back+menu
             builder.adjust(2, repeat=True)
             keyboard = builder.as_markup()
         else:
@@ -284,6 +287,7 @@ async def show_my_verified_channels(
             builder = InlineKeyboardBuilder()
             builder.button(text="➕ Добавить канал", callback_data="start_setup_transfer")
             builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+            builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
             builder.adjust(1)
             keyboard = builder.as_markup()
         
@@ -335,7 +339,8 @@ async def delete_verified_channel_prompt(
         builder = InlineKeyboardBuilder()
         builder.button(text="✅ Да, удалить", callback_data="confirm_delete_verified_channel")
         builder.button(text="❌ Отмена", callback_data="cancel_delete_verified_channel")
-        builder.adjust(2)
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
+        builder.adjust(2, 1)
         
         await callback.message.edit_text(
             text,
@@ -678,6 +683,9 @@ async def verify_admin_after_prompt(
         db_session: Database session
         verified_channel_repo: Repository for verified channels
     """
+    # Answer callback FIRST with loading indicator before any async operations
+    await callback.answer("⏳ Проверяю...")
+    
     data = await state.get_data()
     channel_id = data.get("transfer_tg_channel_id")
     channel_title = data.get("transfer_tg_channel_title", "Канал")
@@ -775,14 +783,14 @@ async def _show_max_connection_instructions(
         # No saved bindings - show connection instructions
         text = (
             f"✅ Канал <b>{channel_title}</b> подтвержден!\n\n"
-            f"Теперь подключите канал/чат в MAX.\n\n"
+            f"Теперь подключите канал/чат в Max.\n\n"
             f"<b>Инструкция:</b>\n"
             f"1. Откройте <b>Настройки канала/чата ➡ Подписчики</b>\n"
             f"2. Добавьте подписчика «Репост» ({MAX_BOT_USERNAME})\n"
             f"3. Перейдите в <b>Настройки канала/чата ➡ Администраторы</b>\n"
             f"4. Добавьте администратора «Репост» ({MAX_BOT_USERNAME})\n"
             f"5. Включите <b>«Писать посты»</b> и сохраните\n\n"
-            f"➡ <b>Вернитесь сюда и отправьте ссылку на канал/чат в MAX</b>\n"
+            f"➡ <b>Вернитесь сюда и отправьте ссылку на канал/чат в Max</b>\n"
             f"<i>https://max.me/username, https://max.ru/join/..., или ID канала/чата</i>\n\n"
             f"⚠️ Если Max не находит бота по нику — попробуйте найти по названию «Репост»"
         )
@@ -899,6 +907,9 @@ async def generate_new_verification_code(callback: CallbackQuery, state) -> None
         callback: Callback query
         state: FSM state
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer("🔄 Генерирую новый код...")
+    
     data = await state.get_data()
     channel_title = data.get("transfer_tg_channel_title", "Канал")
     
@@ -918,7 +929,6 @@ async def generate_new_verification_code(callback: CallbackQuery, state) -> None
         f"⚠️ Код можно удалить сразу после проверки.",
         reply_markup=verify_code_keyboard(),
     )
-    await callback.answer("🔄 Новый код сгенерирован")
 
 
 @transfer_router.callback_query(lambda c: c.data == "verify_back", StateFilter(TransferStates.transfer_verify_code))
@@ -930,18 +940,20 @@ async def back_from_verification(callback: CallbackQuery, state) -> None:
         callback: Callback query
         state: FSM state
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     await callback.message.edit_text(
         "<b>🔗 Пришлите ссылку на ваш Telegram-канал</b>\n\n"
         "Мы выполним перенос постов в 4 этапа:\n"
         "1. <b>Анализ</b>: Посчитаем количество постов.\n"
         "2. <b>Расчёт</b>: Определим стоимость переноса.\n"
-        "3. <b>Подключение</b>: Настроим связь с MAX.\n"
+        "3. <b>Подключение</b>: Настроим связь с Max.\n"
         "4. <b>Запуск</b>: Начнём перенос контента.\n\n"
         "👉 Отправьте ссылку на ваш публичный Telegram-канал:\n"
         "<i>https://t.me/channelname</i>",
         parse_mode="HTML",
     )
-    await callback.answer()
     await state.set_state(TransferStates.transfer_waiting_tg_channel)
 
 
@@ -1015,9 +1027,9 @@ async def detect_channel_auto(callback: CallbackQuery, state) -> None:
     except MaxAPIError as e:
         logger.error(f"Max API error during chat detection: {e}")
         await callback.message.edit_text(
-            f"❌ <b>Ошибка Max API</b>\n\n"
-            f"{str(e)}\n\n"
-            f"Попробуйте ввести chat_id вручную:",
+            "❌ <b>Ошибка подключения к Max</b>\n\n"
+            "Не удалось определить канал автоматически.\n\n"
+            "Попробуйте ввести chat_id вручную:",
             parse_mode="HTML",
             reply_markup=retry_detect_keyboard(),
         )
@@ -1070,8 +1082,8 @@ async def reject_detected_channel(callback: CallbackQuery, state) -> None:
     
     await callback.message.edit_text(
         "🔍 <b>Определяю ID канала/чата...</b>\n\n"
-        "Убедитесь что бот добавлен в канал/чат Max как администратор "
-        "с правом <b>'Писать посты'</b>.",
+        "Убедитесь, что бот добавлен в канал/чат Max как администратор "
+        "с правом <b>«Писать посты»</b>.",
         parse_mode="HTML",
         reply_markup=detect_channel_keyboard(),
     )
@@ -1154,14 +1166,14 @@ async def add_new_max_channel(callback: CallbackQuery, state) -> None:
     
     text = (
         f"✅ Канал <b>{channel_title}</b> подтвержден!\n\n"
-        f"Теперь подключите канал/чат в MAX.\n\n"
+        f"Теперь подключите канал/чат в Max.\n\n"
         f"<b>Инструкция:</b>\n"
         f"1. Откройте <b>Настройки канала/чата ➡ Подписчики</b>\n"
         f"2. Добавьте подписчика «Репост» ({MAX_BOT_USERNAME})\n"
         f"3. Перейдите в <b>Настройки канала/чата ➡ Администраторы</b>\n"
         f"4. Добавьте администратора «Репост» ({MAX_BOT_USERNAME})\n"
         f"5. Включите <b>«Писать посты»</b> и сохраните\n\n"
-        f"➡ <b>Вернитесь сюда и отправьте ссылку на канал/чат в MAX</b>\n"
+        f"➡ <b>Вернитесь сюда и отправьте ссылку на канал/чат в Max</b>\n"
         f"<i>https://max.me/username или ID канала/чата</i>\n\n"
         f"⚠️ Если Max не находит бота по нику — попробуйте найти по названию «Репост»"
     )
@@ -1519,11 +1531,9 @@ async def _execute_transfer(
     except RuntimeError as e:
         logger.error(f"Runtime error during transfer: {e}")
         error_text = (
-            f"❌ <b>Ошибка переноса</b>\n\n"
-            f"{str(e)}\n\n"
-            f"Убедитесь, что:\n"
-            f"• Вы авторизовали Telethon (python scripts/auth_telethon.py)\n"
-            f"• Файл user_session.session существует"
+            "❌ <b>Ошибка переноса</b>\n\n"
+            "Произошла техническая ошибка.\n\n"
+            "Попробуйте позже или обратитесь в поддержку."
         )
         builder = InlineKeyboardBuilder()
         builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
@@ -1556,6 +1566,9 @@ async def cancel_transfer(callback: CallbackQuery, state) -> None:
         callback: Callback query
         state: FSM state
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer("⏳ Останавливаю...")
+    
     user_id = callback.from_user.id
     
     # Check if user has an active transfer
@@ -1568,7 +1581,6 @@ async def cancel_transfer(callback: CallbackQuery, state) -> None:
     if engine:
         engine.abort()
         logger.info(f"Transfer cancelled by user {user_id}")
-        await callback.answer("⏳ Останавливаю перенос...")
         try:
             await callback.message.edit_text(
                 "⏳ <b>Останавливаю перенос...</b>\n\n"
@@ -1820,17 +1832,23 @@ async def _continue_after_max_channel_set(
         await _edit_or_send_message(
             target_message,
             text="❌ Не удалось подсчитать посты в канале.\n\n"
-            f"Ошибка: {str(e)}\n\n"
-            "Убедитесь, что канал публичный и бот имеет к нему доступ.",
+            "Убедитесь, что:\n"
+            "• Канал публичный\n"
+            "• Бот добавлен в администраторы канала",
             state=state,
             reply_markup=builder.as_markup(),
         )
         await state.clear()
         return
 
-    # Check free posts for user
+    # Check free posts for user (admin bypass)
     free_remaining = 0
-    if user_repo and user_id:
+    is_admin = user_id in settings.ADMIN_IDS
+    
+    if is_admin:
+        logger.info(f"Admin {user_id}: unlimited transfer access")
+        free_remaining = 999999  # Unlimited for admin
+    elif user_repo and user_id:
         try:
             user = await user_repo.get_by_telegram_id(user_id)
             if user:
@@ -1839,7 +1857,16 @@ async def _continue_after_max_channel_set(
             logger.warning(f"Could not get user free posts info: {e}")
 
     # Build message based on free posts availability
-    if free_remaining > 0:
+    if is_admin:
+        # Admin - unlimited transfer
+        message_text = (
+            f"📺 Канал: {channel_title}\n"
+            f"📊 Всего постов: {post_count}\n\n"
+            f"♾️ <b>Безлимит</b>\n"
+            f"Вы администратор. Перенос без ограничений.\n\n"
+            f"Выберите сколько постов перенести:"
+        )
+    elif free_remaining > 0:
         # User has free posts available
         message_text = (
             f"📺 Канал: {channel_title}\n"
@@ -1863,7 +1890,7 @@ async def _continue_after_max_channel_set(
         target_message,
         text=message_text,
         state=state,
-        reply_markup=select_count_keyboard(post_count, free_remaining),
+        reply_markup=select_count_keyboard(post_count, free_remaining, is_admin=is_admin),
     )
 
     await state.set_state(TransferStates.transfer_select_count)
@@ -1934,7 +1961,7 @@ async def process_transfer_max_channel(message: Message, state, db_session, user
     if not max_channel_identifier:
         await _edit_or_send_message(
             message,
-            text="❌ Не удалось распознать ссылку на канал MAX.\n\n"
+            text="❌ Не удалось распознать ссылку на канал Max.\n\n"
             "Отправьте:\n"
             "• Ссылку на канал: <i>https://max.me/username</i> или <i>https://max.ru/join/...</i>\n"
             "• Или числовой ID: <i>-123456789</i>",
@@ -1967,8 +1994,8 @@ async def process_transfer_max_channel(message: Message, state, db_session, user
                 await _edit_or_send_message(
                     message,
                     text="🔍 <b>Определяю ID канала/чата...</b>\n\n"
-                    "Убедитесь что бот добавлен в канал Max как администратор "
-                    "с правом <b>'Писать посты'</b>.",
+                    "Убедитесь, что бот добавлен в канал Max как администратор "
+                    "с правом <b>«Писать посты»</b>.",
                     state=state,
                     reply_markup=detect_channel_keyboard(),
                 )
@@ -2059,6 +2086,9 @@ async def process_post_count_selection(
         db_session: Database session for duplicate tracking
         user_repo: User repository for tracking free posts
     """
+    # Answer callback FIRST with loading indicator before any async operations
+    await callback.answer("⏳ Подготовка...")
+    
     action = callback.data.split(":", 1)[1]
     
     # Handle back button
@@ -2089,6 +2119,22 @@ async def process_post_count_selection(
         
         if not user_id or not user_repo:
             await callback.answer("❌ Ошибка: не удалось получить данные пользователя", show_alert=True)
+            return
+        
+        # Admin bypass - unlimited transfer
+        is_admin = user_id in settings.ADMIN_IDS
+        if is_admin:
+            # Admin can transfer all posts without limit
+            await callback.answer("♾️ Админ: безлимитный перенос")
+            await state.update_data(using_free_posts=False, is_admin_transfer=True)
+            await _execute_transfer(
+                callback.message,
+                state,
+                "all",
+                is_callback=True,
+                db_session=db_session,
+                user_repo=user_repo,
+            )
             return
         
         user = await user_repo.get_by_telegram_id(user_id)

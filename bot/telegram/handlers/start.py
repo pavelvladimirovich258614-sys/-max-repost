@@ -40,10 +40,13 @@ def get_welcome_message(first_name: str) -> str:
     """Generate personalized welcome message."""
     return f"""<b>👋 Привет, {first_name}!</b>
 
-Я — <b>Репост</b> 🤖
-Переношу посты из Telegram в Max и настраиваю автопостинг.
+Я бот для переноса постов из Telegram в Max.
 
-🎁 <b>Для новых пользователей — 5 постов бесплатно!</b>
+<b>Что я умею:</b>
+📦 Перенести все ваши посты из TG-канала в Max
+🔄 Настроить автопостинг новых постов
+
+🎁 <b>Новые пользователи получают 5 бесплатных постов!</b>
 
 Выберите действие:"""
 
@@ -52,7 +55,7 @@ INSTRUCTION_MESSAGE = """
 <b>📖 Как пользоваться ботом</b>
 
 <b>📥 Перенос контента:</b>
-1. Нажмите «Перенос контента»
+1. Нажмите «Настроить перенос»
 2. Отправьте ссылку на ваш Telegram-канал
 3. Подтвердите права владения (код в описание канала)
 4. Добавьте бота в канал Max как администратора
@@ -201,6 +204,9 @@ async def cmd_help(message: Message) -> None:
 @start_router.callback_query(lambda c: c.data == "menu_balance")
 async def callback_balance(callback: CallbackQuery, user_repo) -> None:
     """Handle 'Check balance' button - show detailed balance info."""
+    # Answer callback FIRST before any async operations
+    await callback.answer("⏳")
+    
     user = await user_repo.get_by_telegram_id(callback.from_user.id)
     
     # Get user's first name
@@ -223,12 +229,14 @@ async def callback_balance(callback: CallbackQuery, user_repo) -> None:
         parse_mode="HTML",
         reply_markup=back_to_menu_keyboard(),
     )
-    await callback.answer()
 
 
 @start_router.callback_query(lambda c: c.data == "menu_bonus")
 async def callback_bonus(callback: CallbackQuery, user_repo) -> None:
     """Handle 'Bonus posts' button - show free posts info."""
+    # Answer callback FIRST before any async operations
+    await callback.answer("⏳")
+    
     user = await user_repo.get_by_telegram_id(callback.from_user.id)
     
     # Calculate free remaining
@@ -242,12 +250,14 @@ async def callback_bonus(callback: CallbackQuery, user_repo) -> None:
         parse_mode="HTML",
         reply_markup=back_to_menu_keyboard(),
     )
-    await callback.answer()
 
 
 @start_router.callback_query(lambda c: c.data == "menu_promo")
 async def callback_promo(callback: CallbackQuery) -> None:
     """Handle 'Activate promo' button - placeholder."""
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     await callback.message.edit_text(
         "<b>🎟 Активация промокода</b>\n\n"
         "🚧 В разработке\n\n"
@@ -261,12 +271,14 @@ async def callback_promo(callback: CallbackQuery) -> None:
 @start_router.callback_query(lambda c: c.data == "menu_help")
 async def callback_help(callback: CallbackQuery) -> None:
     """Handle 'Help' button - same as /help."""
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     await callback.message.edit_text(
         INSTRUCTION_MESSAGE,
         parse_mode="HTML",
         reply_markup=back_to_menu_keyboard(),
     )
-    await callback.answer()
 
 
 # =============================================================================
@@ -281,6 +293,9 @@ async def callback_goto_menu(
     verified_channel_repo,
 ) -> None:
     """Handle 'Back to menu' navigation."""
+    # Answer callback FIRST before any async operations
+    await callback.answer("⏳")
+    
     user = await user_repo.get_by_telegram_id(callback.from_user.id)
 
     if user is None:
@@ -310,4 +325,3 @@ async def callback_goto_menu(
         parse_mode="HTML",
         reply_markup=menu_keyboard(),
     )
-    await callback.answer()

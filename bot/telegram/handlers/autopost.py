@@ -48,6 +48,9 @@ async def start_autopost_setup(
         state: FSM state
         verified_channel_repo: Repository for verified channels
     """
+    # Answer callback FIRST with loading indicator before any async operations
+    await callback.answer("⏳")
+    
     user_id = callback.from_user.id
     
     try:
@@ -77,6 +80,7 @@ async def start_autopost_setup(
             
             builder.button(text="➕ Другой канал", callback_data="autopost_new_channel")
             builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+            builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
             builder.adjust(1)
             
             await callback.message.edit_text(text, reply_markup=builder.as_markup())
@@ -108,8 +112,6 @@ async def start_autopost_setup(
             parse_mode="HTML",
         )
         await state.set_state(AutopostStates.waiting_tg_channel)
-    
-    await callback.answer()
 
 
 @autopost_router.message(StateFilter(AutopostStates.waiting_tg_channel))
@@ -187,6 +189,9 @@ async def check_admin_status(callback: CallbackQuery, state, bot) -> None:
         state: FSM state with stored channel info
         bot: Bot instance
     """
+    # Answer callback FIRST with loading indicator before any async operations
+    await callback.answer("⏳ Проверяю...")
+    
     data = await state.get_data()
     channel_id = data.get("tg_channel_id")
     channel_title = data.get("tg_channel_title", "Канал")
@@ -214,14 +219,14 @@ async def check_admin_status(callback: CallbackQuery, state, bot) -> None:
             await callback.message.edit_text(
                 f"✅ Админ подтвержден!\n\n"
                 f"Канал: <b>{channel_title}</b>\n\n"
-                f"Теперь подключите канал в MAX.\n\n"
+                f"Теперь подключите канал в Max.\n\n"
                 f"<b>Инструкция:</b>\n"
                 f"1. Откройте <b>Настройки канала ➡ Подписчики</b>\n"
                 f"2. Добавьте подписчика «Репост» ({MAX_BOT_USERNAME})\n"
                 f"3. Перейдите в <b>Настройки канала ➡ Администраторы</b>\n"
                 f"4. Добавьте администратора «Репост» ({MAX_BOT_USERNAME})\n"
                 f"5. Включите <b>«Писать посты»</b> и сохраните\n\n"
-                f"➡ <b>Вернитесь сюда и отправьте ссылку на канал в MAX</b>\n"
+                f"➡ <b>Вернитесь сюда и отправьте ссылку на канал в Max</b>\n"
                 f"<i>https://max.me/username или ID канала</i>\n\n"
                 f"⚠️ Если Max не находит бота по нику — попробуйте найти по названию «Репост»",
                 parse_mode="HTML",
@@ -260,7 +265,7 @@ async def process_max_channel_link(message: Message, state) -> None:
 
     if not max_channel_id:
         await message.answer(
-            "❌ Не удалось распознать ссылку на канал MAX.\n\n"
+            "❌ Не удалось распознать ссылку на канал Max.\n\n"
             "Отправьте ссылку или ID канала.",
         )
         return
@@ -321,7 +326,7 @@ async def process_max_channel_link(message: Message, state) -> None:
     await message.answer(
         f"<b>🎉 Автопостинг настроен!</b>\n\n"
         f"📢 TG: {tg_channel_title}\n"
-        f"➡ MAX: подключен\n"
+        f"➡ Max: подключен\n"
         f"💰 Баланс: 0 постов",
         parse_mode="HTML",
         reply_markup=autopost_complete_keyboard(),
@@ -343,12 +348,14 @@ async def process_max_channel_link(message: Message, state) -> None:
 @autopost_router.callback_query(lambda c: c.data == "autopost_cancel")
 async def cancel_autopost(callback: CallbackQuery, state) -> None:
     """Cancel autopost setup and return to menu."""
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     await state.clear()
     await callback.message.edit_text(
         "❌ Настройка автопостинга отменена.",
         reply_markup=back_to_menu_keyboard(),
     )
-    await callback.answer()
 
 
 @autopost_router.callback_query(lambda c: c.data == "menu_manage_autopost")
@@ -362,6 +369,9 @@ async def show_autopost_management(callback: CallbackQuery, autopost_manager) ->
         callback: Callback query
         autopost_manager: AutopostManager instance
     """
+    # Answer callback FIRST with loading indicator before any async operations
+    await callback.answer("⏳")
+    
     user_id = callback.from_user.id
     
     # Get user's active autoposts
@@ -385,6 +395,7 @@ async def show_autopost_management(callback: CallbackQuery, autopost_manager) ->
         
         builder.button(text="➕ Добавить новый", callback_data="menu_new_autopost")
         builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         builder.adjust(1)
     else:
         text = (
@@ -396,10 +407,10 @@ async def show_autopost_management(callback: CallbackQuery, autopost_manager) ->
         builder = InlineKeyboardBuilder()
         builder.button(text="➕ Настроить автопостинг", callback_data="menu_new_autopost")
         builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         builder.adjust(1)
     
     await callback.message.edit_text(text, reply_markup=builder.as_markup())
-    await callback.answer()
 
 
 @autopost_router.callback_query(lambda c: c.data.startswith("autopost_stop:"))
@@ -411,6 +422,9 @@ async def stop_autopost_handler(callback: CallbackQuery, autopost_manager) -> No
         callback: Callback query
         autopost_manager: AutopostManager instance
     """
+    # Answer callback FIRST with loading indicator before any async operations
+    await callback.answer("⏳ Останавливаю...")
+    
     tg_channel = callback.data.split(":", 1)[1]
     
     success = await autopost_manager.stop_autopost(tg_channel)
@@ -433,6 +447,9 @@ async def start_new_autopost_channel(callback: CallbackQuery, state) -> None:
         callback: Callback query
         state: FSM state
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     await callback.message.edit_text(
         "<b>⚡ Настройка автопостинга</b>\n\n"
         "Новые посты из вашего Telegram-канала будут автоматически появляться в Max "
@@ -444,4 +461,3 @@ async def start_new_autopost_channel(callback: CallbackQuery, state) -> None:
     
     # Set FSM state
     await state.set_state(AutopostStates.waiting_tg_channel)
-    await callback.answer()

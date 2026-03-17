@@ -33,6 +33,9 @@ async def show_channels_list(callback: CallbackQuery, user_repo, channel_repo) -
         user_repo: User repository
         channel_repo: Channel repository
     """
+    # Answer callback FIRST with loading indicator before any async operations
+    await callback.answer("⏳")
+    
     user = await user_repo.get_by_telegram_id(callback.from_user.id)
 
     if user is None:
@@ -43,7 +46,6 @@ async def show_channels_list(callback: CallbackQuery, user_repo, channel_repo) -
             "❌ Пользователь не найден.",
             reply_markup=builder.as_markup(),
         )
-        await callback.answer()
         return
 
     # Get user's channels
@@ -57,7 +59,6 @@ async def show_channels_list(callback: CallbackQuery, user_repo, channel_repo) -
             parse_mode="HTML",
             reply_markup=no_channels_keyboard(),
         )
-        await callback.answer()
         return
 
     # Build channel data for keyboard
@@ -77,7 +78,6 @@ async def show_channels_list(callback: CallbackQuery, user_repo, channel_repo) -
         parse_mode="HTML",
         reply_markup=channels_list_keyboard(channels_data),
     )
-    await callback.answer()
 
 
 # =============================================================================
@@ -95,6 +95,9 @@ async def show_channel_details(callback: CallbackQuery, user_repo, channel_repo)
         user_repo: User repository
         channel_repo: Channel repository
     """
+    # Answer callback FIRST with loading indicator before any async operations
+    await callback.answer("⏳")
+    
     # Extract channel ID
     try:
         channel_id = int(callback.data.split("_")[1])
@@ -150,7 +153,6 @@ async def show_channel_details(callback: CallbackQuery, user_repo, channel_repo)
         parse_mode="HTML",
         reply_markup=channel_settings_keyboard(channel.id, channel.auto_repost),
     )
-    await callback.answer()
 
 
 # =============================================================================
@@ -168,6 +170,9 @@ async def toggle_autopost(callback: CallbackQuery, user_repo, channel_repo) -> N
         user_repo: User repository
         channel_repo: Channel repository
     """
+    # Answer callback FIRST with loading indicator before any async operations
+    await callback.answer("⏳")
+    
     try:
         channel_id = int(callback.data.split("_")[2])
     except (ValueError, IndexError):
@@ -230,7 +235,6 @@ async def toggle_autopost(callback: CallbackQuery, user_repo, channel_repo) -> N
         parse_mode="HTML",
         reply_markup=channel_settings_keyboard(channel.id, new_state),
     )
-    await callback.answer(f"✅ Автопостинг {status_text}")
 
 
 # =============================================================================
@@ -275,6 +279,9 @@ async def request_delete_channel(callback: CallbackQuery) -> None:
     Args:
         callback: Callback query with channel_delete_{id}
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     try:
         channel_id = int(callback.data.split("_")[2])
     except (ValueError, IndexError):
@@ -287,7 +294,6 @@ async def request_delete_channel(callback: CallbackQuery) -> None:
         parse_mode="HTML",
         reply_markup=delete_confirm_keyboard(channel_id),
     )
-    await callback.answer()
 
 
 @channels_router.callback_query(lambda c: c.data and c.data.startswith("channel_delete_confirm_"))
@@ -300,6 +306,9 @@ async def confirm_delete_channel(callback: CallbackQuery, user_repo, channel_rep
         user_repo: User repository
         channel_repo: Channel repository
     """
+    # Answer callback FIRST with loading indicator before any async operations
+    await callback.answer("⏳")
+    
     try:
         channel_id = int(callback.data.split("_")[3])
     except (ValueError, IndexError):
@@ -338,8 +347,6 @@ async def confirm_delete_channel(callback: CallbackQuery, user_repo, channel_rep
     else:
         await callback.answer("❌ Не удалось удалить канал", show_alert=True)
 
-    await callback.answer()
-
 
 @channels_router.callback_query(lambda c: c.data and c.data.startswith("channel_cancel_delete_"))
 async def cancel_delete_channel(callback: CallbackQuery, user_repo, channel_repo) -> None:
@@ -351,14 +358,20 @@ async def cancel_delete_channel(callback: CallbackQuery, user_repo, channel_repo
         user_repo: User repository
         channel_repo: Channel repository
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     # Get the channel ID from the callback data (need to extract it differently)
     # Since we cancelled, we need to go back to the channels list
     # This is a simplified version - in production you'd track which channel was being viewed
 
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
+    
     await callback.message.edit_text(
         "<b>📢 Мои каналы</b>\n\n"
         "Выберите канал для управления:",
         parse_mode="HTML",
+        reply_markup=builder.as_markup(),
     )
-    # Note: In production you'd want to rebuild the actual list
-    await callback.answer()

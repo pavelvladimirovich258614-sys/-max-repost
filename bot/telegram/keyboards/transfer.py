@@ -53,6 +53,7 @@ def saved_max_channels_keyboard(
     # Add new channel button
     builder.button(text="➕ Добавить новый канал", callback_data="transfer_add_new_max")
     builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
     
     # Adjust: 2 columns if showing delete buttons, 1 column otherwise
     if show_delete:
@@ -91,6 +92,7 @@ def detect_channel_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="🔍 Определить ID автоматически", callback_data="transfer_detect_auto")
     builder.button(text="✏️ Ввести chat_id вручную", callback_data="transfer_enter_chat_id")
     builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -122,6 +124,7 @@ def retry_detect_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🔄 Попробовать снова", callback_data="transfer_detect_auto")
     builder.button(text="✏️ Ввести вручную", callback_data="transfer_enter_chat_id")
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -131,10 +134,12 @@ def back_keyboard() -> InlineKeyboardMarkup:
     Create keyboard with back button.
 
     Returns:
-        Inline keyboard with single back button
+        Inline keyboard with back and menu buttons
     """
     builder = InlineKeyboardBuilder()
     builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
+    builder.adjust(2)
     return builder.as_markup()
 
 
@@ -146,25 +151,29 @@ def back_to_start_keyboard() -> InlineKeyboardMarkup:
         Inline keyboard with single button
     """
     builder = InlineKeyboardBuilder()
-    builder.button(text="↩️ В меню", callback_data="nav_goto_menu")
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
     return builder.as_markup()
 
 
-def select_count_keyboard(all_count: int, free_remaining: int = 0) -> InlineKeyboardMarkup:
+def select_count_keyboard(all_count: int, free_remaining: int = 0, is_admin: bool = False) -> InlineKeyboardMarkup:
     """
     Create keyboard for selecting number of posts to transfer.
 
     Args:
         all_count: Total number of posts available
         free_remaining: Number of free posts remaining (0 if none)
+        is_admin: Whether user is admin (shows unlimited option)
 
     Returns:
         Inline keyboard with post count options
     """
     builder = InlineKeyboardBuilder()
     
+    # Admin unlimited button
+    if is_admin:
+        builder.button(text="♾️ Безлимит", callback_data="transfer_count:free")
     # Free posts button (if user has free posts remaining)
-    if free_remaining > 0:
+    elif free_remaining > 0:
         free_count = min(free_remaining, all_count)
         builder.button(text=f"🎁 Бесплатно ({free_count} постов)", callback_data="transfer_count:free")
     
@@ -181,6 +190,7 @@ def select_count_keyboard(all_count: int, free_remaining: int = 0) -> InlineKeyb
     
     builder.button(text="✏️ Своё количество", callback_data="transfer_count:custom")
     builder.button(text="↩️ Назад", callback_data="transfer_count:back")
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
 
     builder.adjust(1)
     return builder.as_markup()
@@ -194,7 +204,7 @@ def transfer_complete_keyboard() -> InlineKeyboardMarkup:
         Inline keyboard with 'Done' button
     """
     builder = InlineKeyboardBuilder()
-    builder.button(text="⏭ Готово → меню", callback_data="nav_goto_menu")
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
     return builder.as_markup()
 
 
@@ -220,6 +230,7 @@ def verified_channels_keyboard(channels: list) -> InlineKeyboardMarkup:
     # Add new channel button
     builder.button(text="➕ Добавить новый канал", callback_data="start_setup_transfer")
     builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
     
     builder.adjust(1)
     return builder.as_markup()
@@ -236,5 +247,6 @@ def verify_code_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="✅ Проверить", callback_data="verify_check")
     builder.button(text="🔄 Новый код", callback_data="verify_new_code")
     builder.button(text="↩️ Назад", callback_data="verify_back")
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
     builder.adjust(1)
     return builder.as_markup()

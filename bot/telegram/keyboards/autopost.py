@@ -11,12 +11,13 @@ def check_admin_keyboard() -> InlineKeyboardMarkup:
     Used when user needs to add bot as admin and verify.
 
     Returns:
-        Inline keyboard with 2 buttons in one row
+        Inline keyboard with buttons
     """
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Проверить", callback_data="autopost_check_admin")
     builder.button(text="↩️ Назад", callback_data="nav_goto_menu")
-    builder.adjust(2)
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
+    builder.adjust(1)
     return builder.as_markup()
 
 
@@ -28,7 +29,7 @@ def back_to_menu_keyboard() -> InlineKeyboardMarkup:
         Inline keyboard with single back button
     """
     builder = InlineKeyboardBuilder()
-    builder.button(text="↩️ В меню", callback_data="nav_goto_menu")
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
     return builder.as_markup()
 
 
@@ -40,5 +41,5 @@ def autopost_complete_keyboard() -> InlineKeyboardMarkup:
         Inline keyboard with 'Done' button
     """
     builder = InlineKeyboardBuilder()
-    builder.button(text="⏭ Готово → меню", callback_data="nav_goto_menu")
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
     return builder.as_markup()

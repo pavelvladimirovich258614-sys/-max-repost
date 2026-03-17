@@ -37,7 +37,7 @@ def menu_keyboard() -> InlineKeyboardMarkup:
 
     builder.button(text="📥 Настроить перенос", callback_data="menu_new_transfer")
     builder.button(text="🔄 Настроить автопостинг", callback_data="menu_new_autopost")
-    builder.button(text="📢 Мои каналы (перенос)", callback_data="menu_my_channels")
+    builder.button(text="📢 Мои каналы", callback_data="menu_my_channels")
     builder.button(text="⚡ Автопостинг", callback_data="menu_manage_autopost")
     builder.button(text="💎 Проверить баланс", callback_data="menu_balance")
     builder.button(text="🎁 Бонусные посты", callback_data="menu_bonus")
@@ -56,5 +56,5 @@ def back_to_menu_keyboard() -> InlineKeyboardMarkup:
         Inline keyboard with single back button
     """
     builder = InlineKeyboardBuilder()
-    builder.button(text="↩️ В меню", callback_data="nav_goto_menu")
+    builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
     return builder.as_markup()

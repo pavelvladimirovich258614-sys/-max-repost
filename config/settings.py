@@ -16,6 +16,14 @@ class Settings(BaseSettings):
     # Telegram Bot
     telegram_bot_token: str = Field(..., alias="TELEGRAM_BOT_TOKEN")
     admin_telegram_id: int = Field(..., alias="ADMIN_TELEGRAM_ID")
+    admin_ids: str = Field(default="", alias="ADMIN_IDS")
+
+    @property
+    def ADMIN_IDS(self) -> list[int]:
+        """Return list of admin Telegram IDs for easy access."""
+        if not self.admin_ids:
+            return []
+        return [int(x.strip()) for x in self.admin_ids.split(",") if x.strip()]
 
     # Telegram API (for Telethon - user session)
     telegram_api_id: int = Field(..., alias="TELEGRAM_API_ID")
