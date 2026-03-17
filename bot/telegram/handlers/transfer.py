@@ -911,6 +911,15 @@ async def select_saved_max_channel(callback: CallbackQuery, state, db_session) -
     # Answer callback FIRST before any async operations
     await callback.answer()
     
+    # Check if already processing a click (race condition protection)
+    state_data = await state.get_data()
+    if state_data.get("processing_saved_channel"):
+        logger.warning(f"Duplicate click ignored for saved channel selection (binding_id={callback.data.split(':')[1]})")
+        return
+    
+    # Set processing flag
+    await state.update_data(processing_saved_channel=True)
+    
     # Extract binding_id from callback data
     binding_id = int(callback.data.split(":")[1])
     
@@ -927,8 +936,11 @@ async def select_saved_max_channel(callback: CallbackQuery, state, db_session) -
         await state.update_data(transfer_max_channel_id=int(binding.max_chat_id))
         logger.info(f"Selected saved Max channel: {binding.max_chat_id} (binding_id={binding_id})")
         
-        # Update last_used_at (already updated, no need to save binding again)
-        await binding_repo.update_last_used(binding_id)
+        # Update last_used_at (non-critical: wrap in try/except to handle "database is locked")
+        try:
+            await binding_repo.update_last_used(binding_id)
+        except Exception as e:
+            logger.warning(f"Failed to update last_used_at for binding {binding_id}: {e}")
         
         # Continue to post counting (don't save binding again for saved channels)
         await _continue_after_max_channel_set(callback.message, state, db_session=None)
@@ -936,6 +948,9 @@ async def select_saved_max_channel(callback: CallbackQuery, state, db_session) -
     except Exception as e:
         logger.error(f"Error selecting saved channel: {e}")
         await callback.answer("❌ Ошибка выбора канала", show_alert=True)
+    finally:
+        # Reset processing flag
+        await state.update_data(processing_saved_channel=False)
 
 
 @transfer_router.callback_query(lambda c: c.data == "transfer_add_new_max", StateFilter(TransferStates.transfer_select_saved_max))

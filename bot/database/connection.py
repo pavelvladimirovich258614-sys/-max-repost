@@ -4,13 +4,20 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.pool import NullPool
 
 from config.settings import settings
 
-# Async engine
+# Async engine with SQLite locking fixes
+# - connect_args={"timeout": 30}: wait up to 30s for lock instead of failing immediately
+# - poolclass=NullPool: required for SQLite async (no connection pooling)
+# - pool_pre_ping=True: verify connection before use
 engine = create_async_engine(
     settings.database_url,
     echo=settings.debug,
+    connect_args={"timeout": 30},
+    poolclass=NullPool,
+    pool_pre_ping=True,
 )
 
 # Session factory

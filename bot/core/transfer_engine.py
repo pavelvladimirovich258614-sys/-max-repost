@@ -345,9 +345,17 @@ def should_skip_message(message: Message, post_index: int = 0) -> tuple[bool, st
     Returns:
         Tuple of (should_skip, reason)
     """
+    import re
     from telethon.tl.types import (
         DocumentAttributeAnimated,
         DocumentAttributeSticker,
+    )
+    
+    # Regex to detect text consisting only of emojis (and whitespace)
+    # Covers: Miscellaneous Symbols, Dingbats, Emoticons, Transport/Map, Symbols, etc.
+    EMOJI_ONLY_PATTERN = re.compile(
+        r'^[\s\u2600-\u26FF\u2700-\u27BF\U0001F300-\U0001F5FF\U0001F600-\U0001F64F\U0001F680-\U0001F6FF\U0001F700-\U0001F77F\U0001F780-\U0001F7FF\U0001F800-\U0001F8FF\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF\U00002702-\U000027B0\U000024C2-\U0001F251]+$',
+        re.UNICODE
     )
 
     # === TEXT DETECTION ===
@@ -430,6 +438,23 @@ def should_skip_message(message: Message, post_index: int = 0) -> tuple[bool, st
     if message.action:
         logger.info(f"Post {post_index}: SKIP CONDITION TRIGGERED - service message: {type(message.action).__name__}")
         return True, f"service message: {type(message.action).__name__}"
+
+    # === CONTENT FILTER: Text-only messages without media ===
+    # Only filter if there is NO media (photos, videos, audio, etc. pass through)
+    if not has_media and has_text:
+        raw_text = message.raw_text or message.text or message.message or ""
+        text_len = len(raw_text.strip())
+        
+        # Skip short text-only messages (likely chat chatter)
+        if text_len < 50:
+            preview = raw_text[:30].replace('\n', ' ')
+            logger.info(f"Post {post_index}: SKIP - short text ({text_len} chars): '{preview}'")
+            return True, f"short text: {text_len} chars"
+        
+        # Skip emoji-only text (no actual content)
+        if EMOJI_ONLY_PATTERN.match(raw_text.strip()):
+            logger.info(f"Post {post_index}: SKIP - text only emojis")
+            return True, "text only emojis"
 
     # Check unsupported media types
     detected_type = detect_media_type(message)
@@ -915,32 +940,53 @@ class TransferEngine:
         text_chunks: list[str],
     ) -> None:
         """Transfer an audio post."""
-        # Download audio to BytesIO
-        buf = io.BytesIO()
-        await message.download_media(file=buf)
-        buf.seek(0)
-        audio_bytes = buf.read()
+        # STAGE 1 - Downloading
+        logger.info(f"Downloading audio {message.id}...")
+        try:
+            buf = io.BytesIO()
+            await message.download_media(file=buf)
+            buf.seek(0)
+            audio_bytes = buf.read()
+            logger.info(f"Downloaded audio {message.id}: {len(audio_bytes)} bytes")
+        except Exception as e:
+            logger.error(f"Download failed for audio {message.id}: {e}", exc_info=True)
+            raise
 
         if not audio_bytes or len(audio_bytes) == 0:
             logger.warning(f"Empty audio bytes for message {message.id}, skipping")
             raise MaxAPIError("Failed to download audio: empty bytes")
 
-        logger.info(f"Downloaded audio: {len(audio_bytes)} bytes")
+        # Warning for large files
+        if len(audio_bytes) > 50 * 1024 * 1024:  # 50 MB
+            logger.warning(f"Large audio file: {len(audio_bytes)} bytes, may take time...")
 
-        # Upload to Max
-        token = await self.max_client.upload_audio(audio_bytes)
+        # STAGE 2 - Upload
+        logger.info(f"Uploading audio {message.id}, size={len(audio_bytes)} bytes")
+        try:
+            token = await self.max_client.upload_audio(audio_bytes)
+            logger.info(f"Upload successful, token={token[:20]}...")
+        except Exception as e:
+            logger.error(f"Upload failed for audio {message.id}: {e}", exc_info=True)
+            raise
 
-        # Send first chunk with audio, remaining chunks as separate messages
-        first_chunk = text_chunks[0] if text_chunks else ""
-        attachment = {"type": "audio", "payload": {"token": token}}
-        
-        await self.max_client.send_message(
-            chat_id=max_channel_id,
-            text=first_chunk,
-            attachments=[attachment],
-            format="html",
-        )
-        
+        # STAGE 3 - Sending
+        logger.info(f"Sending audio message to {max_channel_id}")
+        try:
+            # Send first chunk with audio, remaining chunks as separate messages
+            first_chunk = text_chunks[0] if text_chunks else ""
+            attachment = {"type": "audio", "payload": {"token": token}}
+
+            await self.max_client.send_message(
+                chat_id=max_channel_id,
+                text=first_chunk,
+                attachments=[attachment],
+                format="html",
+            )
+            logger.info(f"Successfully sent audio message {message.id}")
+        except Exception as e:
+            logger.error(f"Send failed for audio {message.id}: {e}", exc_info=True)
+            raise
+
         # Send remaining text chunks
         for chunk in text_chunks[1:]:
             await asyncio.sleep(1)

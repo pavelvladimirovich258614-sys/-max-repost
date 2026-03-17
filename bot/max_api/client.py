@@ -157,7 +157,7 @@ class MaxClient:
         access_token: str | None = None,
         base_url: str | None = None,
         rate_limiter: TokenBucketRateLimiter | None = None,
-        upload_pause: float = 2.0,
+        upload_pause: float = 3.0,
         max_retries: int = 5,
     ) -> None:
         """
@@ -167,7 +167,7 @@ class MaxClient:
             access_token: Max API access token (defaults to settings)
             base_url: API base URL (defaults to production)
             rate_limiter: Rate limiter instance (creates own if None)
-            upload_pause: Seconds to pause after upload (default 2.0)
+            upload_pause: Seconds to pause after upload (default 3.0)
             max_retries: Maximum retry attempts for failed requests
         """
         self.access_token = access_token or settings.max_access_token
@@ -574,7 +574,7 @@ class MaxClient:
 
         # Retry logic for attachment.not.ready errors
         max_retries = 3
-        retry_delay = 2.0
+        retry_delays = [3.0, 5.0, 8.0]
 
         # Log request details for debugging
         logger.info(f"send_message request: chat_id={chat_id}, text={text[:100]!r}, params={{'chat_id': chat_id}}, payload={payload}")
@@ -595,10 +595,12 @@ class MaxClient:
                 )
             except AttachmentNotReadyError as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Attachment not ready, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
-                    await asyncio.sleep(retry_delay)
+                    delay = retry_delays[attempt]
+                    logger.warning(f"Attachment not ready, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(delay)
                 else:
-                    raise e
+                    logger.error(f"Attachment not ready after {max_retries} attempts, giving up")
+                    raise
             except MaxAPIError as e:
                 logger.error(f"send_message error: {e}, status_code={e.status_code}, response_data={e.response_data}")
                 raise
@@ -846,7 +848,12 @@ class MaxClient:
         Raises:
             MaxAPIError: On upload failure
         """
+        # Step 1: Initiate upload and get token
+        logger.info("Initiating audio upload...")
         upload_info = await self._upload_initiate(MediaType.AUDIO)
+        logger.info(f"Audio upload initiated, token received: {upload_info.token[:20] if upload_info.token else 'empty'}...")
+
+        # Step 2: Upload file to the provided URL
         upload_response = await self._upload_file(
             upload_info.url,
             file_path,
