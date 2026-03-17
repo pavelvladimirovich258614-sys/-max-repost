@@ -219,6 +219,9 @@ async def show_my_verified_channels(
         callback: Callback query
         verified_channel_repo: Repository for verified channels
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     user_id = callback.from_user.id
     
     try:
@@ -245,7 +248,6 @@ async def show_my_verified_channels(
             keyboard = builder.as_markup()
         
         await callback.message.edit_text(text, reply_markup=keyboard)
-        await callback.answer()
         
     except Exception as e:
         logger.error(f"Error loading verified channels for user {user_id}: {e}")
@@ -272,6 +274,9 @@ async def select_verified_channel(
         db_session: Database session
         verified_channel_repo: Repository for verified channels
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     # Extract channel username from callback data
     tg_channel = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
@@ -297,8 +302,6 @@ async def select_verified_channel(
             await callback.answer("⚠️ Требуется повторная верификация", show_alert=True)
             await _show_verification_code(callback.message, state, chat.title, db_session, verified_channel_repo)
             return
-        
-        await callback.answer(f"✅ Канал {chat.title} выбран")
         
         # Proceed directly to Max channel selection (skip verification)
         await _show_max_connection_instructions(callback.message, state, chat.title, db_session, user_repo=None)
@@ -572,8 +575,8 @@ async def _show_max_connection_instructions(
         # Show saved channels list
         text = (
             f"✅ Канал <b>{channel_title}</b> подтвержден!\n\n"
-            f"📋 <b>Сохранённые каналы Max:</b>\n"
-            f"Выберите канал для переноса или добавьте новый:"
+            f"📋 <b>Сохранённые каналы/чаты Max:</b>\n"
+            f"Выберите канал/чат для переноса или добавьте новый:"
         )
         
         keyboard = saved_max_channels_keyboard(saved_bindings, show_delete=True)
@@ -590,15 +593,15 @@ async def _show_max_connection_instructions(
         # No saved bindings - show connection instructions
         text = (
             f"✅ Канал <b>{channel_title}</b> подтвержден!\n\n"
-            f"Теперь подключите канал в MAX.\n\n"
+            f"Теперь подключите канал/чат в MAX.\n\n"
             f"<b>Инструкция:</b>\n"
-            f"1. Откройте <b>Настройки канала ➡ Подписчики</b>\n"
+            f"1. Откройте <b>Настройки канала/чата ➡ Подписчики</b>\n"
             f"2. Добавьте подписчика «Репост» ({MAX_BOT_USERNAME})\n"
-            f"3. Перейдите в <b>Настройки канала ➡ Администраторы</b>\n"
+            f"3. Перейдите в <b>Настройки канала/чата ➡ Администраторы</b>\n"
             f"4. Добавьте администратора «Репост» ({MAX_BOT_USERNAME})\n"
             f"5. Включите <b>«Писать посты»</b> и сохраните\n\n"
-            f"➡ <b>Вернитесь сюда и отправьте ссылку на канал в MAX</b>\n"
-            f"<i>https://max.me/username, https://max.ru/join/..., или ID канала</i>\n\n"
+            f"➡ <b>Вернитесь сюда и отправьте ссылку на канал/чат в MAX</b>\n"
+            f"<i>https://max.me/username, https://max.ru/join/..., или ID канала/чата</i>\n\n"
             f"⚠️ Если Max не находит бота по нику — попробуйте найти по названию «Репост»"
         )
 
@@ -635,6 +638,9 @@ async def check_verification_code(
         db_session: Database session from middleware
         verified_channel_repo: Repository for verified channels
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer("⏳ Проверяю код...")
+    
     data = await state.get_data()
     code = data.get("verification_code")
     tg_channel = data.get("transfer_tg_channel_username")
@@ -645,7 +651,6 @@ async def check_verification_code(
             "❌ Ошибка: данные верификации утеряны. Начните заново.",
             reply_markup=back_to_start_keyboard(),
         )
-        await callback.answer()
         await state.clear()
         return
     
@@ -772,37 +777,39 @@ async def detect_channel_auto(callback: CallbackQuery, state) -> None:
     """
     import asyncio
 
+    # Answer callback FIRST before any async operations
+    await callback.answer("⏳ Определяю ID...")
+
     await callback.message.edit_text(
         "⏳ <b>Слушаю обновления Max API...</b> (до 30 сек)\n\n"
-        "Если бот уже в канале — напишите любое сообщение в канал Max.",
+        "Если бот уже в канале/чате — напишите любое сообщение в канал/чат Max.",
         parse_mode="HTML",
     )
-    await callback.answer()
 
     try:
         # Use asyncio.wait_for to prevent blocking the bot for too long
         async with MaxClient() as client:
             chat_id = await asyncio.wait_for(
-                client.find_channel_chat_id(timeout=30),
+                client.find_chat_id(timeout=30),
                 timeout=35  # Slightly longer than API timeout
             )
 
         if chat_id:
-            # Found channel - ask for confirmation
+            # Found channel/chat - ask for confirmation
             await callback.message.edit_text(
-                f"✅ <b>Найден канал!</b>\n\n"
+                f"✅ <b>Найден канал/чат!</b>\n\n"
                 f"chat_id = <code>{chat_id}</code>\n\n"
-                f"Использовать этот канал?",
+                f"Использовать этот канал/чат?",
                 parse_mode="HTML",
                 reply_markup=confirm_channel_keyboard(chat_id),
             )
         else:
-            # No channel found
+            # No channel/chat found
             await callback.message.edit_text(
                 "❌ <b>Не удалось определить ID</b>\n\n"
                 "Попробуйте:\n"
-                "1. Удалите бота из канала и добавьте заново\n"
-                "2. Напишите сообщение в канал\n"
+                "1. Удалите бота из канала/чата и добавьте заново\n"
+                "2. Напишите сообщение в канал/чат\n"
                 "3. Нажмите <b>'Определить ID'</b> ещё раз",
                 parse_mode="HTML",
                 reply_markup=retry_detect_keyboard(),
@@ -814,15 +821,15 @@ async def detect_channel_auto(callback: CallbackQuery, state) -> None:
             "❌ <b>Не удалось определить ID</b>\n\n"
             "Таймаут ожидания (30 сек).\n\n"
             "Попробуйте:\n"
-            "1. Удалите бота из канала и добавьте заново\n"
-            "2. Напишите сообщение в канал\n"
+            "1. Удалите бота из канала/чата и добавьте заново\n"
+            "2. Напишите сообщение в канал/чат\n"
             "3. Нажмите <b>'Определить ID'</b> ещё раз",
             parse_mode="HTML",
             reply_markup=retry_detect_keyboard(),
         )
 
     except MaxAPIError as e:
-        logger.error(f"Max API error during channel detection: {e}")
+        logger.error(f"Max API error during chat detection: {e}")
         await callback.message.edit_text(
             f"❌ <b>Ошибка Max API</b>\n\n"
             f"{str(e)}\n\n"
@@ -832,9 +839,9 @@ async def detect_channel_auto(callback: CallbackQuery, state) -> None:
         )
 
     except Exception as e:
-        logger.error(f"Unexpected error during channel detection: {e}")
+        logger.error(f"Unexpected error during chat detection: {e}")
         await callback.message.edit_text(
-            "❌ <b>Ошибка при определении канала</b>\n\n"
+            "❌ <b>Ошибка при определении канала/чата</b>\n\n"
             "Попробуйте ввести chat_id вручную:",
             parse_mode="HTML",
             reply_markup=retry_detect_keyboard(),
@@ -851,14 +858,15 @@ async def confirm_detected_channel(callback: CallbackQuery, state, db_session) -
         state: FSM state
         db_session: Database session
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer("✅ Канал/чат выбран")
+    
     # Extract chat_id from callback data
     chat_id = int(callback.data.split(":")[1])
 
     # Store the chat_id
     await state.update_data(transfer_max_channel_id=chat_id)
     logger.info(f"Auto-detected chat_id confirmed: {chat_id}")
-
-    await callback.answer("✅ Канал выбран")
 
     # Continue to post counting (save binding for future use)
     await _continue_after_max_channel_set(callback.message, state, db_session, user_repo=None)
@@ -873,14 +881,16 @@ async def reject_detected_channel(callback: CallbackQuery, state) -> None:
         callback: Callback query
         state: FSM state
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     await callback.message.edit_text(
-        "🔍 <b>Определяю ID канала...</b>\n\n"
-        "Убедитесь что бот добавлен в канал Max как администратор "
+        "🔍 <b>Определяю ID канала/чата...</b>\n\n"
+        "Убедитесь что бот добавлен в канал/чат Max как администратор "
         "с правом <b>'Писать посты'</b>.",
         parse_mode="HTML",
         reply_markup=detect_channel_keyboard(),
     )
-    await callback.answer()
 
 
 # =============================================================================
@@ -898,6 +908,9 @@ async def select_saved_max_channel(callback: CallbackQuery, state, db_session) -
         state: FSM state
         db_session: Database session
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     # Extract binding_id from callback data
     binding_id = int(callback.data.split(":")[1])
     
@@ -917,8 +930,6 @@ async def select_saved_max_channel(callback: CallbackQuery, state, db_session) -
         # Update last_used_at (already updated, no need to save binding again)
         await binding_repo.update_last_used(binding_id)
         
-        await callback.answer("✅ Канал выбран")
-        
         # Continue to post counting (don't save binding again for saved channels)
         await _continue_after_max_channel_set(callback.message, state, db_session=None)
         
@@ -936,25 +947,27 @@ async def add_new_max_channel(callback: CallbackQuery, state) -> None:
         callback: Callback query
         state: FSM state
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     state_data = await state.get_data()
     channel_title = state_data.get("transfer_tg_channel_title", "Канал")
     
     text = (
         f"✅ Канал <b>{channel_title}</b> подтвержден!\n\n"
-        f"Теперь подключите канал в MAX.\n\n"
+        f"Теперь подключите канал/чат в MAX.\n\n"
         f"<b>Инструкция:</b>\n"
-        f"1. Откройте <b>Настройки канала ➡ Подписчики</b>\n"
+        f"1. Откройте <b>Настройки канала/чата ➡ Подписчики</b>\n"
         f"2. Добавьте подписчика «Репост» ({MAX_BOT_USERNAME})\n"
-        f"3. Перейдите в <b>Настройки канала ➡ Администраторы</b>\n"
+        f"3. Перейдите в <b>Настройки канала/чата ➡ Администраторы</b>\n"
         f"4. Добавьте администратора «Репост» ({MAX_BOT_USERNAME})\n"
         f"5. Включите <b>«Писать посты»</b> и сохраните\n\n"
-        f"➡ <b>Вернитесь сюда и отправьте ссылку на канал в MAX</b>\n"
-        f"<i>https://max.me/username или ID канала</i>\n\n"
+        f"➡ <b>Вернитесь сюда и отправьте ссылку на канал/чат в MAX</b>\n"
+        f"<i>https://max.me/username или ID канала/чата</i>\n\n"
         f"⚠️ Если Max не находит бота по нику — попробуйте найти по названию «Репост»"
     )
     
     await callback.message.edit_text(text, parse_mode="HTML")
-    await callback.answer()
     await state.set_state(TransferStates.transfer_waiting_max_channel)
 
 
@@ -967,12 +980,15 @@ async def delete_saved_max_channel_prompt(callback: CallbackQuery, state) -> Non
         callback: Callback query
         state: FSM state
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     binding_id = int(callback.data.split(":")[1])
     
     text = (
         "🗑 <b>Удаление канала</b>\n\n"
-        "Вы уверены, что хотите удалить этот канал из сохранённых?\n\n"
-        "Это не удалит канал в Max, только уберёт из списка быстрого доступа."
+        "Вы уверены, что хотите удалить этот канал/чат из сохранённых?\n\n"
+        "Это не удалит канал/чат в Max, только уберёт из списка быстрого доступа."
     )
     
     await callback.message.edit_text(
@@ -980,7 +996,6 @@ async def delete_saved_max_channel_prompt(callback: CallbackQuery, state) -> Non
         parse_mode="HTML",
         reply_markup=confirm_delete_binding_keyboard(binding_id),
     )
-    await callback.answer()
     await state.set_state(TransferStates.transfer_select_saved_max)
 
 
@@ -994,6 +1009,9 @@ async def confirm_delete_binding(callback: CallbackQuery, state, db_session) -> 
         state: FSM state
         db_session: Database session
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     binding_id = int(callback.data.split(":")[1])
     user_id = callback.from_user.id
     
@@ -1002,10 +1020,10 @@ async def confirm_delete_binding(callback: CallbackQuery, state, db_session) -> 
         deleted = await binding_repo.delete_binding(user_id, binding_id)
         
         if deleted:
-            await callback.answer("✅ Канал удалён", show_alert=True)
+            await callback.answer("✅ Канал/чат удалён", show_alert=True)
             logger.info(f"User {user_id} deleted binding {binding_id}")
         else:
-            await callback.answer("❌ Канал не найден", show_alert=True)
+            await callback.answer("❌ Канал/чат не найден", show_alert=True)
             
         # Refresh the list
         state_data = await state.get_data()
@@ -1027,10 +1045,12 @@ async def cancel_delete_binding(callback: CallbackQuery, state, db_session) -> N
         state: FSM state
         db_session: Database session
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer("Отменено")
+    
     state_data = await state.get_data()
     channel_title = state_data.get("transfer_tg_channel_title", "Канал")
     
-    await callback.answer("Отменено")
     await _show_max_connection_instructions(callback.message, state, channel_title, db_session)
 
 
@@ -1277,6 +1297,9 @@ async def enable_autopost_after_transfer(
         state: FSM state (may still have data or be cleared)
         autopost_manager: AutopostManager instance
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     # Get data from state (may be cleared, so we need to handle that)
     data = await state.get_data()
     user_id = callback.from_user.id
@@ -1289,7 +1312,6 @@ async def enable_autopost_after_transfer(
             "❌ Данные переноса утеряны. Настройте автопостинг через меню.",
             reply_markup=back_to_start_keyboard(),
         )
-        await callback.answer()
         return
     
     # Ensure max_channel_id is int
@@ -1319,8 +1341,6 @@ async def enable_autopost_after_transfer(
                 reply_markup=back_to_start_keyboard(),
             )
         
-        await callback.answer()
-        
     except Exception as e:
         logger.error(f"Failed to enable autopost: {e}")
         await callback.message.edit_text(
@@ -1328,7 +1348,6 @@ async def enable_autopost_after_transfer(
             "Попробуйте настроить через меню «⚡ Автопостинг».",
             reply_markup=back_to_start_keyboard(),
         )
-        await callback.answer()
 
 
 # =============================================================================
@@ -1354,19 +1373,21 @@ async def prompt_manual_chat_id(callback: CallbackQuery, state) -> None:
         callback: Callback query
         state: FSM state
     """
+    # Answer callback FIRST before any async operations
+    await callback.answer()
+    
     await callback.message.edit_text(
         "<b>📝 Ввод chat_id вручную</b>\n\n"
-        "Max API не возвращает каналы в списке чатов.\n"
-        "Введите числовой ID канала (отрицательное число).\n\n"
+        "Max API не возвращает каналы/чаты в списке.\n"
+        "Введите числовой ID канала/чата (отрицательное число).\n\n"
         "<b>Как получить chat_id:</b>\n"
         "1. Запустите: <code>python scripts/listen_updates.py</code>\n"
-        "2. Удалите и добавьте бота в канал Max\n"
+        "2. Удалите и добавьте бота в канал/чат Max\n"
         "3. Скопируйте числовой ID из события\n\n"
         "<b>Пример:</b> <code>-70977371223467</code>",
         parse_mode="HTML",
         reply_markup=back_keyboard(),
     )
-    await callback.answer()
     await state.set_state(TransferStates.transfer_enter_max_chat_id)
 
 
@@ -1392,7 +1413,7 @@ async def process_manual_chat_id(message: Message, state, db_session, user_repo)
             await _edit_or_send_message(
                 message,
                 text="❌ <b>Некорректный chat_id</b>\n\n"
-                "ID канала в Max должен быть <b>отрицательным числом</b>.\n"
+                "ID канала/чата в Max должен быть <b>отрицательным числом</b>.\n"
                 "Пример: <code>-70977371223467</code>\n\n"
                 "Попробуйте снова:",
                 state=state,
@@ -1631,7 +1652,7 @@ async def process_transfer_max_channel(message: Message, state, db_session, user
                 # Max API doesn't return channels in /chats - show auto-detect options
                 await _edit_or_send_message(
                     message,
-                    text="🔍 <b>Определяю ID канала...</b>\n\n"
+                    text="🔍 <b>Определяю ID канала/чата...</b>\n\n"
                     "Убедитесь что бот добавлен в канал Max как администратор "
                     "с правом <b>'Писать посты'</b>.",
                     state=state,
@@ -1686,7 +1707,7 @@ async def process_transfer_max_channel(message: Message, state, db_session, user
     if not max_channel_id:
         await _edit_or_send_message(
             message,
-            text="❌ <b>Не удалось определить канал</b>\n\n"
+            text="❌ <b>Не удалось определить канал/чат</b>\n\n"
             "Попробуйте ввести chat_id вручную:",
             state=state,
             reply_markup=_build_manual_chat_id_keyboard(),
@@ -1720,11 +1741,12 @@ async def process_post_count_selection(
     
     # Handle back button
     if action == "back":
+        # Answer callback FIRST before any async operations
+        await callback.answer()
         # Go back to Max channel selection
         data = await state.get_data()
         channel_title = data.get("transfer_tg_channel_title", "Канал")
         await _show_max_connection_instructions(callback.message, state, channel_title, db_session, user_repo)
-        await callback.answer()
         return
     
     # Handle custom count input
