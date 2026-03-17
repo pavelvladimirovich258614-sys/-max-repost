@@ -231,10 +231,11 @@ async def process_transfer_tg_channel(message: Message, state, bot) -> None:
 
     if not channel_username:
         await _edit_or_send_message(
-            message, state,
-            "❌ Не удалось распознать ссылку на канал.\n\n"
+            message,
+            text="❌ Не удалось распознать ссылку на канал.\n\n"
             "Отправьте ссылку в формате:\n"
             "<i>https://t.me/channelname</i> или <i>@channelname</i>",
+            state=state,
         )
         return
 
@@ -247,12 +248,13 @@ async def process_transfer_tg_channel(message: Message, state, bot) -> None:
     except Exception as e:
         logger.error(f"Failed to get chat info: {e}")
         await _edit_or_send_message(
-            message, state,
-            "❌ Не удалось получить информацию о канале.\n\n"
+            message,
+            text="❌ Не удалось получить информацию о канале.\n\n"
             "Убедитесь, что:\n"
             "• Канал публичный\n"
             "• Ссылка корректная\n\n"
             "Попробуйте снова:",
+            state=state,
             reply_markup=back_keyboard(),
         )
         return
@@ -272,13 +274,14 @@ async def process_transfer_tg_channel(message: Message, state, bot) -> None:
 
     if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
         await _edit_or_send_message(
-            message, state,
-            f"<b>📢 Канал найден: {chat.title}</b>\n\n"
+            message,
+            text=f"<b>📢 Канал найден: {chat.title}</b>\n\n"
             f"Для доступа к постам бота нужно добавить в администраторы.\n\n"
             f"<b>Инструкция:</b>\n"
             f"1. Откройте настройки канала ➡ Администраторы.\n"
             f"2. Добавьте @{TG_BOT_USERNAME} как администратора.\n"
             f"3. Сохраните изменения и нажмите «Продолжить».",
+            state=state,
             reply_markup=_build_continue_keyboard(),
         )
         await state.set_state(TransferStates.transfer_waiting_verification)
@@ -325,8 +328,9 @@ async def _show_verification_code(
     )
     
     await _edit_or_send_message(
-        target_message, state,
+        target_message,
         text=text,
+        state=state,
         reply_markup=verify_code_keyboard(),
     )
     await state.set_state(TransferStates.transfer_verify_code)
@@ -425,8 +429,9 @@ async def _show_max_connection_instructions(
         keyboard = saved_max_channels_keyboard(saved_bindings, show_delete=True)
         
         await _edit_or_send_message(
-            target_message, state,
+            target_message,
             text=text,
+            state=state,
             reply_markup=keyboard,
         )
         
@@ -448,8 +453,9 @@ async def _show_max_connection_instructions(
         )
 
         await _edit_or_send_message(
-            target_message, state,
+            target_message,
             text=text,
+            state=state,
             reply_markup=back_keyboard(),
         )
 
@@ -1115,21 +1121,23 @@ async def process_manual_chat_id(message: Message, state, db_session) -> None:
         chat_id = int(text)
         if chat_id >= 0:
             await _edit_or_send_message(
-                message, state,
-                "❌ <b>Некорректный chat_id</b>\n\n"
+                message,
+                text="❌ <b>Некорректный chat_id</b>\n\n"
                 "ID канала в Max должен быть <b>отрицательным числом</b>.\n"
                 "Пример: <code>-70977371223467</code>\n\n"
                 "Попробуйте снова:",
+                state=state,
                 reply_markup=back_keyboard(),
             )
             return
     except ValueError:
         await _edit_or_send_message(
-            message, state,
-            "❌ <b>Некорректный формат</b>\n\n"
+            message,
+            text="❌ <b>Некорректный формат</b>\n\n"
             "Введите числовой ID (только цифры со знаком минус).\n"
             "Пример: <code>-70977371223467</code>\n\n"
             "Попробуйте снова:",
+            state=state,
             reply_markup=back_keyboard(),
         )
         return
@@ -1200,10 +1208,11 @@ async def _continue_after_max_channel_set(target_message: Message | CallbackQuer
     except Exception as e:
         logger.error(f"Error counting posts: {e}")
         await _edit_or_send_message(
-            target_message, state,
-            "❌ Не удалось подсчитать посты в канале.\n\n"
+            target_message,
+            text="❌ Не удалось подсчитать посты в канале.\n\n"
             f"Ошибка: {str(e)}\n\n"
             "Убедитесь, что канал публичный и бот имеет к нему доступ.",
+            state=state,
             reply_markup=back_keyboard(),
         )
         await state.clear()
@@ -1212,13 +1221,14 @@ async def _continue_after_max_channel_set(target_message: Message | CallbackQuer
     total_price = post_count * PRICE_PER_POST
 
     await _edit_or_send_message(
-        target_message, state,
-        f"<b>🚀 Мастер переноса</b>\n"
+        target_message,
+        text=f"<b>🚀 Мастер переноса</b>\n"
         f"Канал: {channel_title}\n"
         f"Постов: ~{post_count}\n\n"
         f"💰 Тариф: {PRICE_PER_POST} руб./пост\n"
         f"Итого за все: {total_price} руб.\n\n"
         f"🔢 Сколько постов перенести?",
+        state=state,
         reply_markup=select_count_keyboard(post_count),
     )
 
@@ -1289,11 +1299,12 @@ async def process_transfer_max_channel(message: Message, state, db_session) -> N
 
     if not max_channel_identifier:
         await _edit_or_send_message(
-            message, state,
-            "❌ Не удалось распознать ссылку на канал MAX.\n\n"
+            message,
+            text="❌ Не удалось распознать ссылку на канал MAX.\n\n"
             "Отправьте:\n"
             "• Ссылку на канал: <i>https://max.me/username</i> или <i>https://max.ru/join/...</i>\n"
             "• Или числовой ID: <i>-123456789</i>",
+            state=state,
             reply_markup=back_keyboard(),
         )
         return
@@ -1320,10 +1331,11 @@ async def process_transfer_max_channel(message: Message, state, db_session) -> N
             if not chats:
                 # Max API doesn't return channels in /chats - show auto-detect options
                 await _edit_or_send_message(
-                    message, state,
-                    "🔍 <b>Определяю ID канала...</b>\n\n"
+                    message,
+                    text="🔍 <b>Определяю ID канала...</b>\n\n"
                     "Убедитесь что бот добавлен в канал Max как администратор "
                     "с правом <b>'Писать посты'</b>.",
+                    state=state,
                     reply_markup=detect_channel_keyboard(),
                 )
                 await state.set_state(TransferStates.transfer_detect_max_channel)
@@ -1351,12 +1363,13 @@ async def process_transfer_max_channel(message: Message, state, db_session) -> N
     except MaxAPIError as e:
         logger.error(f"Max API error: {e}")
         await _edit_or_send_message(
-            message, state,
-            "❌ Ошибка подключения к Max API.\n\n"
+            message,
+            text="❌ Ошибка подключения к Max API.\n\n"
             "Убедитесь, что:\n"
             f"• Бот «Репост» ({MAX_BOT_USERNAME}) добавлен в канал\n"
             "• Боту выданы права «Писать посты»\n\n"
             "Попробуйте снова:",
+            state=state,
             reply_markup=back_keyboard(),
         )
         return
@@ -1364,17 +1377,19 @@ async def process_transfer_max_channel(message: Message, state, db_session) -> N
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         await _edit_or_send_message(
-            message, state,
-            "❌ Произошла ошибка. Попробуйте позже.",
+            message,
+            text="❌ Произошла ошибка. Попробуйте позже.",
+            state=state,
             reply_markup=back_keyboard(),
         )
         return
 
     if not max_channel_id:
         await _edit_or_send_message(
-            message, state,
-            "❌ <b>Не удалось определить канал</b>\n\n"
+            message,
+            text="❌ <b>Не удалось определить канал</b>\n\n"
             "Попробуйте ввести chat_id вручную:",
+            state=state,
             reply_markup=_build_manual_chat_id_keyboard(),
         )
         return
@@ -1453,8 +1468,9 @@ async def process_custom_post_count(message: Message, state) -> None:
             raise ValueError()
     except ValueError:
         await _edit_or_send_message(
-            message, state,
-            "❌ Введите корректное число (больше 0).",
+            message,
+            text="❌ Введите корректное число (больше 0).",
+            state=state,
             reply_markup=back_keyboard(),
         )
         return
