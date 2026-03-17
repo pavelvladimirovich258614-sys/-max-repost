@@ -5,6 +5,8 @@ import asyncio
 from bot.utils.logger import init_logger
 from bot.telegram.bot import init_bot
 from bot.database import Base, engine
+from bot.max_api.max_bot_handler import MaxBotListener
+from config.settings import settings
 
 
 async def init_db() -> None:
@@ -57,6 +59,7 @@ async def main() -> None:
     Async main function - entry point for the bot application.
 
     Initializes logging, database, creates bot and dispatcher, starts polling.
+    Also starts Max bot listener for responding to messages in Max messenger.
     """
     # Initialize logger
     init_logger()
@@ -68,6 +71,11 @@ async def main() -> None:
     # Initialize bot and dispatcher
     bot, dp = await init_bot()
 
+    # Start Max bot listener (responds to messages in Max messenger)
+    max_listener = MaxBotListener(settings.max_access_token)
+    listener_task = asyncio.create_task(max_listener.start())
+    print("Max bot listener started")
+
     # Start polling
     try:
         await dp.start_polling(
@@ -75,7 +83,14 @@ async def main() -> None:
             allowed_updates=dp.resolve_used_update_types(),
         )
     finally:
-        # Graceful shutdown handled by dispatcher.shutdown()
+        # Graceful shutdown
+        print("Shutting down Max bot listener...")
+        await max_listener.stop()
+        listener_task.cancel()
+        try:
+            await listener_task
+        except asyncio.CancelledError:
+            pass
         print("Max-Repost Bot stopped")
 
 
