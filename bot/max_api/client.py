@@ -281,21 +281,28 @@ class MaxClient:
                             data.get("error", "Resource not found") if isinstance(data, dict) else "Not found"
                         )
 
+                    elif response.status == 413:
+                        # Payload Too Large - don't retry, log and return None
+                        error_msg = data.get("error", "Payload too large") if isinstance(data, dict) else "Payload too large"
+                        logger.error(f"HTTP 413: {error_msg}")
+                        return None
+
                     elif response.status == 429:
+                        # Max 3 retries for rate limiting
+                        if attempt >= 3:
+                            logger.error(f"Rate limited after {attempt} retries, giving up")
+                            raise RateLimitError(f"Rate limited after {attempt} retries", retry_after=10)
+
                         retry_after = response.headers.get("Retry-After")
                         if retry_after:
-                            retry_after_int = int(retry_after)
+                            delay = int(retry_after)
                         else:
-                            retry_after_int = None
+                            delay = 10  # Default 10 seconds
 
-                        # Calculate exponential backoff
-                        delay = min(0.5 * (2 ** attempt), 4.0)
-                        if retry_after_int:
-                            delay = max(delay, retry_after_int)
-
-                        logger.warning(f"Rate limited, waiting {delay}s before retry")
+                        logger.warning(f"Rate limited, retrying after {delay}s")
                         await asyncio.sleep(delay)
-                        last_error = RateLimitError(retry_after=retry_after_int)
+                        last_error = RateLimitError(retry_after=delay)
+                        continue  # Continue to next retry attempt
 
                     elif 400 <= response.status < 500:
                         # Check for attachment.not.ready error
@@ -319,8 +326,25 @@ class MaxClient:
                             response_data=data if isinstance(data, dict) else None,
                         )
 
+                    elif 500 <= response.status < 600:
+                        # Server errors (5xx) - retry up to 2 times with 5 second delay
+                        if attempt >= 2:
+                            logger.error(f"Server error {response.status} after {attempt} retries, giving up")
+                            raise MaxAPIError(
+                                f"Server error {response.status} after retries",
+                                status_code=response.status,
+                            )
+
+                        logger.warning(f"Server error {response.status}, retrying in 5s (attempt {attempt + 1}/2)")
+                        await asyncio.sleep(5)
+                        last_error = MaxAPIError(
+                            f"Server error {response.status}",
+                            status_code=response.status,
+                        )
+                        continue  # Continue to next retry attempt
+
                     else:
-                        # Server errors - retry
+                        # Other errors - retry with exponential backoff
                         delay = min(0.5 * (2 ** attempt), 4.0)
                         logger.warning(f"Server error {response.status}, retrying in {delay}s")
                         await asyncio.sleep(delay)
@@ -335,11 +359,24 @@ class MaxClient:
                 await asyncio.sleep(delay)
                 last_error = MaxAPIError(f"Network error: {e}")
 
+            except asyncio.TimeoutError as e:
+                delay = min(0.5 * (2 ** attempt), 4.0)
+                logger.warning(f"Request timeout, retrying in {delay}s")
+                await asyncio.sleep(delay)
+                last_error = MaxAPIError(f"Request timeout: {e}")
+
+            except Exception as e:
+                # Unknown errors - log with exc_info and return None
+                logger.error(f"Unexpected error in request: {e}", exc_info=True)
+                return None
+
         # All retries exhausted
         if last_error:
-            raise last_error
+            logger.error(f"Request failed after all retries: {last_error}")
+            return None
 
-        raise MaxAPIError("Request failed after all retries")
+        logger.error("Request failed after all retries")
+        return None
 
     # ========================================================================
     # API Methods
@@ -677,7 +714,9 @@ class MaxClient:
 
         # Upload using POST 
         # Use a CLEAN session without Authorization header - upload URL is pre-signed
-        timeout = aiohttp.ClientTimeout(total=300, connect=30)  # Increased timeout for large files
+        timeout_seconds = 300
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds, connect=30)
+        logger.info(f"Upload timeout set to {timeout_seconds}s for large file")
         async with aiohttp.ClientSession(timeout=timeout) as upload_session:
             if use_resumable:
                 # Resumable upload: NO Content-Type header, raw binary data

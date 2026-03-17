@@ -1,12 +1,13 @@
 """Post transfer handler - FSM flow for manual post transfer from TG to Max."""
 
+import asyncio
 import re
 import time
 from typing import Optional
 
 from aiogram import Router
 from aiogram.filters import StateFilter
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from loguru import logger
 
@@ -31,6 +32,23 @@ from bot.core.transfer_engine import TransferEngine, TransferResult
 from bot.database.repositories.max_channel_binding import MaxChannelBindingRepository
 from bot.database.repositories.verified_channel import VerifiedChannelRepository
 from config.settings import settings
+
+
+# =============================================================================
+# Concurrency Control
+# =============================================================================
+
+# Track active user transfers (Level 1: per-user limit)
+_active_transfers: set[int] = set()  # user_ids currently transferring
+
+# Global semaphore for max concurrent transfers (Level 2: global limit)
+_transfer_semaphore = asyncio.Semaphore(3)
+
+# Track active transfer engines for cancellation
+_active_engines: dict[int, TransferEngine] = {}  # user_id -> TransferEngine
+
+# Maximum posts per transfer limit
+MAX_TRANSFER_POSTS = 500
 
 
 # =============================================================================
@@ -1093,8 +1111,6 @@ async def _execute_transfer(
         db_session: Optional database session for duplicate tracking
         user_repo: Optional user repository for tracking free posts
     """
-    import asyncio
-    
     data = await state.get_data()
     user_id = data.get("user_id")
     tg_channel = data.get("transfer_tg_channel_username", "")
@@ -1114,19 +1130,60 @@ async def _execute_transfer(
         await state.clear()
         return
 
-    # Show initial progress message
-    count_text = "Все посты" if count == "all" else f"{count} постов"
+    # Level 1: Check if user already has an active transfer
+    if user_id in _active_transfers:
+        await (message.edit_text if is_callback else message.answer)(
+            "⏳ Перенос уже выполняется, дождитесь завершения",
+            reply_markup=back_to_start_keyboard(),
+        )
+        return
+
+    # Level 2: Check global limit
+    if _transfer_semaphore.locked():
+        await (message.edit_text if is_callback else message.answer)(
+            "⏳ Сервер загружен, попробуйте через пару минут",
+            reply_markup=back_to_start_keyboard(),
+        )
+        return
+
+    # Add user to active transfers set
+    _active_transfers.add(user_id)
+
+    # Apply 500 posts limit
+    original_count = count
+    limited_count = count
+    if isinstance(count, int) and count > MAX_TRANSFER_POSTS:
+        limited_count = MAX_TRANSFER_POSTS
+        logger.info(f"Limiting transfer to {MAX_TRANSFER_POSTS} posts (requested {original_count})")
+    # Note: "all" case - the limit will be applied based on actual total in the engine
+    count = limited_count
+
+    # Show initial progress message with cancel button
+    count_text = "Все посты" if original_count == "all" else f"{original_count} постов"
+    if isinstance(original_count, int) and original_count > MAX_TRANSFER_POSTS:
+        count_text = f"{MAX_TRANSFER_POSTS} из {original_count} постов (лимит)"
+    
+    # Create cancel keyboard
+    cancel_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Остановить перенос", callback_data="transfer_cancel")]
+    ])
+    
     progress_message = await (message.answer if not is_callback else message.edit_text)(
         f"🚀 <b>Перенос запущен!</b>\n\n"
         f"📺 Канал: {channel_title}\n"
         f"📝 Выбрано: {count_text}\n\n"
         f"⏳ Подготовка...",
         parse_mode="HTML",
+        reply_markup=cancel_keyboard,
     )
+    
+    # Store progress message ID and engine reference in state for cancel handler
+    await state.update_data(transfer_progress_message_id=progress_message.message_id)
 
     # Create progress callback with progress bar
     posts_since_update = 0
     UPDATE_EVERY = 3  # Update every 3 posts to avoid rate limits
+    transfer_start_time = time.time()  # Track actual transfer start time for ETA
 
     def build_progress_bar(current: int, total: int) -> str:
         """Build a 10-character progress bar."""
@@ -1147,10 +1204,19 @@ async def _execute_transfer(
         percent = int((current / total) * 100) if total > 0 else 0
         bar = build_progress_bar(current, total)
         
-        # Calculate estimated time remaining (rough estimate: ~2 seconds per post)
-        remaining_posts = total - current
-        eta_seconds = remaining_posts * 2
-        if eta_seconds > 60:
+        # Calculate better ETA based on actual elapsed time
+        elapsed = time.time() - transfer_start_time
+        if current > 0:
+            avg_time_per_post = elapsed / current
+            remaining_posts = total - current
+            eta_seconds = int(avg_time_per_post * remaining_posts)
+        else:
+            eta_seconds = 0
+        
+        # Format ETA text
+        if eta_seconds > 3600:
+            eta_text = f"~{eta_seconds // 3600} ч {(eta_seconds % 3600) // 60} мин осталось"
+        elif eta_seconds > 60:
             eta_text = f"~{eta_seconds // 60} мин осталось"
         else:
             eta_text = f"~{eta_seconds} сек осталось"
@@ -1160,43 +1226,47 @@ async def _execute_transfer(
                 f"🚀 <b>Перенос в процессе!</b>\n\n"
                 f"📺 Канал: {channel_title}\n"
                 f"📊 Прогресс: {bar} {percent}%\n"
-                f"📤 Перенесено: {current} из {total}\n"
-                f"⏱ {eta_text}",
+                f"📤 Перенесено: {current}/{total} ({eta_text})",
                 parse_mode="HTML",
+                reply_markup=cancel_keyboard,
             )
         except Exception as e:
             logger.warning(f"Failed to update progress message: {e}")
 
-    # Execute transfer
+    # Execute transfer with semaphore acquisition
     try:
-        # Get clients
-        telethon = get_telethon_client(
-            api_id=settings.telegram_api_id,
-            api_hash=settings.telegram_api_hash,
-            phone=settings.telegram_phone,
-        )
-        max_client = MaxClient()
+        async with _transfer_semaphore:
+            # Get clients
+            telethon = get_telethon_client(
+                api_id=settings.telegram_api_id,
+                api_hash=settings.telegram_api_hash,
+                phone=settings.telegram_phone,
+            )
+            max_client = MaxClient()
 
-        # Create engine with duplicate tracking
-        engine = TransferEngine(
-            telethon_client=telethon,
-            max_api_client=max_client,
-            db_session=db_session,
-            user_id=user_id,
-            tg_channel=tg_channel,
-            max_channel_id=max_channel_id,
-        )
+            # Create engine with duplicate tracking
+            engine = TransferEngine(
+                telethon_client=telethon,
+                max_api_client=max_client,
+                db_session=db_session,
+                user_id=user_id,
+                tg_channel=tg_channel,
+                max_channel_id=max_channel_id,
+            )
+            
+            # Store engine for potential cancellation
+            _active_engines[user_id] = engine
 
-        # Run transfer
-        result: TransferResult = await engine.transfer_posts(
-            tg_channel=tg_channel,
-            max_channel_id=max_channel_id,
-            count=count,
-            progress_callback=progress_callback,
-        )
+            # Run transfer
+            result: TransferResult = await engine.transfer_posts(
+                tg_channel=tg_channel,
+                max_channel_id=max_channel_id,
+                count=count,
+                progress_callback=progress_callback,
+            )
 
-        # Close clients
-        await max_client.close()
+            # Close clients
+            await max_client.close()
 
         # Update free_posts_used if this was a free transfer
         data = await state.get_data()
@@ -1293,7 +1363,44 @@ async def _execute_transfer(
         await progress_message.edit_text(error_text, parse_mode="HTML", reply_markup=back_keyboard())
 
     finally:
+        # Remove user from active transfers set and cleanup engine
+        _active_transfers.discard(user_id)
+        _active_engines.pop(user_id, None)
         await state.clear()
+
+
+@transfer_router.callback_query(lambda c: c.data == "transfer_cancel")
+async def cancel_transfer(callback: CallbackQuery, state) -> None:
+    """
+    Cancel the ongoing transfer for the user.
+    
+    Args:
+        callback: Callback query
+        state: FSM state
+    """
+    user_id = callback.from_user.id
+    
+    # Check if user has an active transfer
+    if user_id not in _active_transfers:
+        await callback.answer("❌ Нет активного переноса", show_alert=True)
+        return
+    
+    # Get the engine and abort it
+    engine = _active_engines.get(user_id)
+    if engine:
+        engine.abort()
+        logger.info(f"Transfer cancelled by user {user_id}")
+        await callback.answer("⏳ Останавливаю перенос...")
+        try:
+            await callback.message.edit_text(
+                "⏳ <b>Останавливаю перенос...</b>\n\n"
+                "Дождитесь завершения текущей операции.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+    else:
+        await callback.answer("❌ Не удалось остановить перенос", show_alert=True)
 
 
 @transfer_router.callback_query(lambda c: c.data == "transfer_enable_autopost")
@@ -1818,6 +1925,27 @@ async def process_post_count_selection(
     else:
         await callback.answer("Неизвестный выбор", show_alert=True)
         return
+    
+    # Validate 500 posts limit for "all" selection
+    if count == "all":
+        data = await state.get_data()
+        tg_channel = data.get("transfer_tg_channel_username", "")
+        if tg_channel:
+            try:
+                telethon = get_telethon_client(
+                    api_id=settings.telegram_api_id,
+                    api_hash=settings.telegram_api_hash,
+                    phone=settings.telegram_phone,
+                )
+                post_count = await telethon.count_channel_posts(tg_channel)
+                if post_count > MAX_TRANSFER_POSTS:
+                    logger.info(f"Limiting transfer to {MAX_TRANSFER_POSTS} posts (requested all, total {post_count})")
+                    await callback.answer(
+                        f"⚠️ В канале {post_count} постов. Будет перенесено первые {MAX_TRANSFER_POSTS}.",
+                        show_alert=True
+                    )
+            except Exception as e:
+                logger.warning(f"Could not count posts for limit check: {e}")
 
     await callback.answer()
     await _execute_transfer(
@@ -1868,5 +1996,16 @@ async def process_custom_post_count(
             reply_markup=back_keyboard(),
         )
         return
+    
+    # Validate 500 posts limit
+    if count > MAX_TRANSFER_POSTS:
+        logger.info(f"Limiting transfer to {MAX_TRANSFER_POSTS} posts (requested {count})")
+        await _edit_or_send_message(
+            message,
+            text=f"⚠️ Максимум {MAX_TRANSFER_POSTS} постов за один перенос.\n"
+                 f"Будет перенесено {MAX_TRANSFER_POSTS} постов.",
+            state=state,
+            reply_markup=back_keyboard(),
+        )
 
     await _execute_transfer(message, state, count, is_callback=False, db_session=db_session, user_repo=user_repo)

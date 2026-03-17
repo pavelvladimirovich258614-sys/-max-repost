@@ -12,12 +12,14 @@ import asyncio
 import html
 import io
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from loguru import logger
+from telethon.errors import FloodWaitError
 from telethon.tl.types import (
     Message,
     MessageEntityBold,
@@ -439,6 +441,62 @@ def should_skip_message(message: Message, post_index: int = 0) -> tuple[bool, st
         logger.info(f"Post {post_index}: SKIP CONDITION TRIGGERED - service message: {type(message.action).__name__}")
         return True, f"service message: {type(message.action).__name__}"
 
+    # === SIZE CHECKS for media documents ===
+    if message.media and isinstance(message.media, MessageMediaDocument):
+        doc = message.media.document
+        if doc and hasattr(doc, 'size') and doc.size:
+            size_mb = doc.size / (1024 * 1024)
+            
+            # Determine media type from attributes
+            is_video = False
+            is_audio = False
+            is_video_note = False
+            is_sticker = False
+            is_gif = False
+            
+            for attr in doc.attributes:
+                if isinstance(attr, DocumentAttributeVideo):
+                    if getattr(attr, 'round_message', False):
+                        is_video_note = True
+                    else:
+                        is_video = True
+                elif isinstance(attr, DocumentAttributeAudio):
+                    is_audio = True
+                elif isinstance(attr, DocumentAttributeSticker):
+                    is_sticker = True
+                elif isinstance(attr, DocumentAttributeAnimated):
+                    is_gif = True
+            
+            # Skip video notes
+            if is_video_note:
+                logger.info(f"Post {post_index}: SKIP - video_note not supported")
+                return True, "video_note not supported"
+            
+            # Skip stickers
+            if is_sticker:
+                logger.info(f"Post {post_index}: SKIP - sticker not supported")
+                return True, "sticker not supported"
+            
+            # Skip GIFs
+            if is_gif:
+                logger.info(f"Post {post_index}: SKIP - gif not supported")
+                return True, "gif not supported"
+            
+            # Check video size limit (100 MB)
+            if is_video and size_mb > 100:
+                logger.info(f"Post {post_index}: SKIP - video too large: {size_mb:.1f}MB")
+                return True, f"video too large: {size_mb:.1f}MB"
+            
+            # Check audio size limit (100 MB)
+            if is_audio and size_mb > 100:
+                logger.info(f"Post {post_index}: SKIP - audio too large: {size_mb:.1f}MB")
+                return True, f"audio too large: {size_mb:.1f}MB"
+            
+            # Check generic file size limit (50 MB) - only for non-video, non-audio files
+            if not is_video and not is_audio and size_mb > 50:
+                logger.info(f"Post {post_index}: SKIP - file too large: {size_mb:.1f}MB")
+                return True, f"file too large: {size_mb:.1f}MB"
+
     # === CONTENT FILTER: Text-only messages without media ===
     # Only filter if there is NO media (photos, videos, audio, etc. pass through)
     if not has_media and has_text:
@@ -552,6 +610,10 @@ class TransferEngine:
         # Track progress toward target (initialized here for visibility in final logs)
         transferred_count = 0
         junk_scanned = 0  # Safety: count junk messages scanned
+        
+        # Track start time for timeout
+        start_time = time.time()
+        TIMEOUT_SECONDS = 7200  # 2 hours
 
         try:
             # Get Telethon client
@@ -580,6 +642,12 @@ class TransferEngine:
                 limit=iter_limit,  # No limit - scan all if needed
                 reverse=True,  # Oldest first
             ):
+                # Check for timeout (2 hours)
+                elapsed = time.time() - start_time
+                if elapsed > TIMEOUT_SECONDS:
+                    logger.warning(f"Transfer timeout after 2 hours, stopping. Elapsed: {elapsed:.0f}s")
+                    break
+                
                 if self._abort_flag:
                     logger.info("Transfer aborted by flag")
                     break
@@ -717,8 +785,31 @@ class TransferEngine:
                     # Reset consecutive errors on success
                     consecutive_errors = 0
 
-                    # Rate limiting delay
-                    await asyncio.sleep(self.POST_DELAY)
+                    # === Rate limiting between posts ===
+                    # Base pause: 2 seconds (safe for 30 rps)
+                    delay = 2.0
+                    
+                    # Media pause: +3 seconds if post has media (download + upload + send = 3 requests)
+                    has_media = bool(message.media)
+                    if has_media:
+                        delay += 3.0
+                    
+                    # Long pause: 10 seconds every 50 posts (cool down from both APIs)
+                    if transferred_count > 0 and transferred_count % 50 == 0:
+                        delay = 10.0
+                        logger.info(f"Rate limit pause: {int(delay)}s after post {transferred_count} (cooldown)")
+                    else:
+                        logger.info(f"Rate limit pause: {int(delay)}s after post {transferred_count}")
+                    
+                    await asyncio.sleep(delay)
+
+                except FloodWaitError as e:
+                    wait_time = e.seconds + 5
+                    logger.warning(f"Telethon FloodWaitError: waiting {wait_time}s")
+                    await asyncio.sleep(wait_time)
+                    consecutive_errors += 1
+                    # Don't count as failed, just retry this post
+                    continue
 
                 except MaxAPIError as e:
                     consecutive_errors += 1
@@ -898,6 +989,15 @@ class TransferEngine:
         text_chunks: list[str],
     ) -> None:
         """Transfer a video post."""
+        # SIZE CHECK - Before downloading
+        if message.media and isinstance(message.media, MessageMediaDocument):
+            doc = message.media.document
+            if doc and hasattr(doc, 'size') and doc.size:
+                size_mb = doc.size / (1024 * 1024)
+                if size_mb > 100:
+                    logger.warning(f"Video {message.id} exceeds size limit: {size_mb:.1f}MB > 100MB")
+                    raise MaxAPIError(f"video too large: {size_mb:.1f}MB (max 100MB)")
+        
         # Download video to BytesIO
         buf = io.BytesIO()
         await message.download_media(file=buf)
@@ -940,6 +1040,15 @@ class TransferEngine:
         text_chunks: list[str],
     ) -> None:
         """Transfer an audio post."""
+        # SIZE CHECK - Before downloading
+        if message.media and isinstance(message.media, MessageMediaDocument):
+            doc = message.media.document
+            if doc and hasattr(doc, 'size') and doc.size:
+                size_mb = doc.size / (1024 * 1024)
+                if size_mb > 100:
+                    logger.warning(f"Audio {message.id} exceeds size limit: {size_mb:.1f}MB > 100MB")
+                    raise MaxAPIError(f"audio too large: {size_mb:.1f}MB (max 100MB)")
+        
         # STAGE 1 - Downloading
         logger.info(f"Downloading audio {message.id}...")
         try:
@@ -1003,6 +1112,15 @@ class TransferEngine:
         text_chunks: list[str],
     ) -> None:
         """Transfer a file/document post."""
+        # SIZE CHECK - Before downloading
+        if message.media and isinstance(message.media, MessageMediaDocument):
+            doc = message.media.document
+            if doc and hasattr(doc, 'size') and doc.size:
+                size_mb = doc.size / (1024 * 1024)
+                if size_mb > 50:
+                    logger.warning(f"File {message.id} exceeds size limit: {size_mb:.1f}MB > 50MB")
+                    raise MaxAPIError(f"file too large: {size_mb:.1f}MB (max 50MB)")
+        
         # Download file to BytesIO
         buf = io.BytesIO()
         await message.download_media(file=buf)
