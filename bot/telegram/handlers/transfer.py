@@ -468,13 +468,14 @@ async def _show_max_connection_instructions(
 
 
 @transfer_router.callback_query(lambda c: c.data == "verify_check", StateFilter(TransferStates.transfer_verify_code))
-async def check_verification_code(callback: CallbackQuery, state) -> None:
+async def check_verification_code(callback: CallbackQuery, state, db_session) -> None:
     """
     Check if verification code is present in channel description.
     
     Args:
         callback: Callback query
         state: FSM state
+        db_session: Database session from middleware
     """
     data = await state.get_data()
     code = data.get("verification_code")
@@ -504,8 +505,8 @@ async def check_verification_code(callback: CallbackQuery, state) -> None:
         if is_verified:
             await callback.answer("✅ Права подтверждены!", show_alert=True)
             logger.info(f"Channel {tg_channel} ownership verified for user {callback.from_user.id}")
-            # Proceed to Max channel selection
-            await _show_max_connection_instructions(callback.message, state, channel_title)
+            # Proceed to Max channel selection (pass db_session to load saved bindings)
+            await _show_max_connection_instructions(callback.message, state, channel_title, db_session)
         else:
             await callback.answer("❌ Код не найден", show_alert=True)
             await callback.message.edit_text(

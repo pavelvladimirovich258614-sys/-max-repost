@@ -44,8 +44,9 @@ class DBMiddleware(BaseMiddleware):
             Handler result
         """
         async with get_session() as session:
-            # Inject session
+            # Inject session (both keys for compatibility)
             data["session"] = session
+            data["db_session"] = session
 
             # Inject repositories
             data["user_repo"] = UserRepository(session)
