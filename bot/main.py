@@ -68,6 +68,7 @@ async def main() -> None:
 
     Initializes logging, database, creates bot and dispatcher, starts polling.
     Also starts Max bot listener for responding to messages in Max messenger.
+    Telethon client runs in parallel for receiving channel updates.
     """
     # Initialize logger
     init_logger()
@@ -79,12 +80,17 @@ async def main() -> None:
     # Initialize bot and dispatcher
     bot, dp = await init_bot()
 
-    # Initialize AutopostManager
+    # Initialize Telethon client (for user-based MTProto operations)
     telethon_client = TelethonChannelClient(
         api_id=settings.telegram_api_id,
         api_hash=settings.telegram_api_hash,
         phone=settings.telegram_phone,
     )
+    
+    # Initialize and start the Telethon client
+    # This connects and starts the internal update loop
+    await telethon_client._get_client()
+    
     max_client = MaxClient(settings.max_access_token)
     autopost_manager = AutopostManager(telethon_client, max_client, bot)
     set_autopost_manager(autopost_manager)
@@ -103,15 +109,19 @@ async def main() -> None:
     listener_task = asyncio.create_task(max_listener.start())
     print("Max bot listener started")
 
-    # Start polling
+    # Start polling and Telethon event loop in parallel
+    # Both must run in the same asyncio event loop for Telethon events to work
     try:
-        await dp.start_polling(
-            bot,
-            allowed_updates=dp.resolve_used_update_types(),
+        await asyncio.gather(
+            dp.start_polling(
+                bot,
+                allowed_updates=dp.resolve_used_update_types(),
+            ),
+            telethon_client.run_until_disconnected(),
         )
     finally:
         # Graceful shutdown
-        print("Shutting down Max bot listener...")
+        print("Shutting down...")
         await max_listener.stop()
         listener_task.cancel()
         try:
@@ -120,6 +130,10 @@ async def main() -> None:
             pass
         except Exception as e:
             logger.error(f"Max listener task failed: {e}", exc_info=True)
+        
+        # Disconnect Telethon client
+        await telethon_client.close()
+        
         print("Max-Repost Bot stopped")
 
 

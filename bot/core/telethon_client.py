@@ -90,36 +90,26 @@ class TelethonChannelClient:
                 api_hash=self.api_hash,
             )
 
-            # Connect with saved session (no code needed)
-            await self._client.connect()
-
-            # Verify session is valid
-            if not await self._client.is_user_authorized():
-                logger.error("Session exists but user is not authorized. "
-                           "Delete session file and run auth script again.")
-                raise RuntimeError(
-                    "Session invalid. Delete user_session.session and "
-                    "run 'python scripts/auth_telethon.py' again."
-                )
-
-            logger.info(f"Telethon connected with user session: {self.phone}")
-            
-            # Start the client in the background to enable event listening
-            # This is needed for NewMessage events to work
-            import asyncio
-            asyncio.create_task(self._keep_client_alive())
-            logger.info("Telethon client event loop started in background")
+            # Start the client (connect + auth + start update loop)
+            # This is REQUIRED for receiving NewMessage events
+            await self._client.start(phone=self.phone)
+            logger.info(f"Telethon client started with user session: {self.phone}")
             
         return self._client
     
-    async def _keep_client_alive(self) -> None:
-        """Keep client connected and listening for events."""
+    async def run_until_disconnected(self) -> None:
+        """
+        Run the client until disconnected.
+        
+        This keeps the client alive and listening for events.
+        Must be run in parallel with aiogram polling in the same event loop.
+        """
+        if self._client is None:
+            logger.warning("Cannot run_until_disconnected: client not initialized")
+            return
+        
         try:
-            # catch_up() processes any missed updates
-            await self._client.catch_up()
-            logger.info("Telethon client caught up with missed updates")
-            
-            # Keep the client alive - run_until_disconnected blocks until disconnect
+            logger.info("Telethon client event loop started (run_until_disconnected)")
             await self._client.run_until_disconnected()
         except Exception as e:
             logger.error(f"Telethon client event loop error: {e}", exc_info=True)
