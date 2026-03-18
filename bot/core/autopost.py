@@ -77,6 +77,7 @@ class AutopostManager:
         tg_channel: str,
         max_chat_id: int,
         user_id: int,
+        subscription: object | None = None,
     ) -> bool:
         """
         Start autoposting for a channel.
@@ -85,6 +86,7 @@ class AutopostManager:
             tg_channel: Telegram channel username (with or without @)
             max_chat_id: Max channel chat_id
             user_id: Telegram user ID who owns this autopost
+            subscription: Optional AutopostSubscription object for catch-up logic
             
         Returns:
             True if started successfully, False otherwise
@@ -102,6 +104,15 @@ class AutopostManager:
             client = await self.telethon_client._get_client()
             entity = await client.get_entity(tg_channel)
             
+            # Catch-up logic: process missed posts before setting up event handler
+            try:
+                await self._catch_up_missed_posts(
+                    client, entity, tg_channel, max_chat_id, user_id, subscription
+                )
+            except Exception as e:
+                logger.error(f"Catch-up failed for {tg_channel}: {e}")
+                # Continue with monitoring even if catch-up fails
+            
             # Create event handler with closure for user_id and tg_channel
             @client.on(events.NewMessage(chats=entity))
             async def handler(event):
@@ -111,7 +122,8 @@ class AutopostManager:
                         event.message, 
                         max_chat_id, 
                         user_id, 
-                        tg_channel
+                        tg_channel,
+                        subscription
                     )
                 except Exception as e:
                     logger.error(f"Autopost error for {tg_channel}: {e}")
@@ -122,6 +134,7 @@ class AutopostManager:
                 "user_id": user_id,
                 "handler": handler,
                 "entity": entity,
+                "subscription": subscription,
             }
             
             logger.info(f"Autopost started: {tg_channel} -> {max_chat_id}")
@@ -130,6 +143,103 @@ class AutopostManager:
         except Exception as e:
             logger.error(f"Failed to start autopost for {tg_channel}: {e}")
             return False
+    
+    async def _catch_up_missed_posts(
+        self,
+        client,
+        entity,
+        tg_channel: str,
+        max_chat_id: int,
+        user_id: int,
+        subscription: object | None,
+    ) -> None:
+        """
+        Catch up missed posts that were published while autopost was paused.
+        
+        Args:
+            client: Telethon client
+            entity: Telegram channel entity
+            tg_channel: Telegram channel username (without @)
+            max_chat_id: Max channel chat_id
+            user_id: Telegram user ID
+            subscription: AutopostSubscription object with last_post_id
+        """
+        if subscription is None:
+            logger.debug(f"No subscription provided for {tg_channel}, skipping catch-up")
+            return
+        
+        subscription_id = getattr(subscription, 'id', None)
+        last_post_id = getattr(subscription, 'last_post_id', None)
+        
+        if last_post_id is not None:
+            # Get recent messages and filter missed ones
+            missed_messages = []
+            async for message in client.iter_messages(entity, limit=50):
+                if message.id > last_post_id:
+                    missed_messages.append(message)
+            
+            if not missed_messages:
+                logger.info(f"No missed posts for @{tg_channel}")
+                return
+            
+            # Sort by ID ascending (oldest first) to process in order
+            missed_messages.sort(key=lambda m: m.id)
+            
+            transferred_count = 0
+            is_admin = user_id in settings.ADMIN_IDS
+            
+            for message in missed_messages:
+                # Check if should skip
+                should_skip, skip_reason = self._should_skip_autopost(message)
+                if should_skip:
+                    logger.debug(f"Catch-up: skipping message {message.id} - {skip_reason}")
+                    continue
+                
+                # Check balance if not admin
+                if not is_admin:
+                    async with get_session() as session:
+                        success, error = await charge_autopost_with_subscription(
+                            session=session,
+                            user_id=user_id,
+                            tg_channel=tg_channel,
+                            post_id=message.id
+                        )
+                        if not success:
+                            if error == "insufficient_funds":
+                                await self._notify_insufficient_funds(user_id, tg_channel)
+                                await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
+                            logger.warning(f"Catch-up: failed to charge for message {message.id}, stopping")
+                            break
+                
+                # Forward the post
+                try:
+                    await self._do_forward(message, max_chat_id)
+                    transferred_count += 1
+                    
+                    # Update last_post_id in database
+                    if subscription_id:
+                        async with get_session() as session:
+                            repo = AutopostSubscriptionRepository(session)
+                            await repo.update_last_post_id(subscription_id, message.id)
+                except Exception as e:
+                    logger.error(f"Catch-up: failed to forward message {message.id}: {e}")
+                    continue
+            
+            logger.info(f"Catch-up: transferred {transferred_count} missed posts for @{tg_channel}")
+        else:
+            # First start: get the latest message ID and set it as last_post_id
+            latest_message = None
+            async for message in client.iter_messages(entity, limit=1):
+                latest_message = message
+                break
+            
+            if latest_message and subscription_id:
+                async with get_session() as session:
+                    repo = AutopostSubscriptionRepository(session)
+                    await repo.update_last_post_id(subscription_id, latest_message.id)
+                logger.info(f"First start: setting last_post_id to {latest_message.id} for @{tg_channel}")
+            else:
+                logger.info(f"First start: no messages found in @{tg_channel}")
     
     async def stop_autopost(self, tg_channel: str) -> bool:
         """
@@ -166,7 +276,8 @@ class AutopostManager:
         message: Message, 
         max_chat_id: int, 
         user_id: int, 
-        tg_channel: str
+        tg_channel: str,
+        subscription: object | None = None,
     ) -> None:
         """
         Forward a single post to Max with balance check.
@@ -176,6 +287,7 @@ class AutopostManager:
             max_chat_id: Max channel chat_id
             user_id: Telegram user ID
             tg_channel: Telegram channel username
+            subscription: Optional AutopostSubscription object to update last_post_id
         """
         # Log new message received
         logger.info(f"Autopost: new message in @{tg_channel}, id={message.id}")
@@ -208,7 +320,15 @@ class AutopostManager:
         # 4. Forward the post
         await self._do_forward(message, max_chat_id)
         
-        # 5. Log success
+        # 5. Update last_post_id in database
+        if subscription:
+            subscription_id = getattr(subscription, 'id', None)
+            if subscription_id:
+                async with get_session() as session:
+                    repo = AutopostSubscriptionRepository(session)
+                    await repo.update_last_post_id(subscription_id, message.id)
+        
+        # 6. Log success
         logger.info(f"Autopost: @{tg_channel} post #{message.id} transferred")
     
     async def _do_forward(self, message: Message, max_chat_id: int) -> None:
@@ -534,6 +654,7 @@ class AutopostManager:
             tg_channel=subscription.tg_channel,
             max_chat_id=subscription.max_chat_id,
             user_id=subscription.user_id,
+            subscription=subscription,
         )
     
     async def stop_monitoring(self, subscription_id: int) -> bool:

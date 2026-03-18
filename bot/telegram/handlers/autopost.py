@@ -1,7 +1,7 @@
 """Auto-posting handler - managing TG -> Max autopost subscriptions."""
 
 from aiogram import Router
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from loguru import logger
@@ -15,6 +15,98 @@ COST_PER_POST = 3  # 3 rubles per post
 
 # Create router
 autopost_router = Router(name="autopost")
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+async def _render_autopost_list(
+    message: Message,
+    user_id: int,
+    autopost_sub_repo,
+    balance_repo,
+) -> None:
+    """
+    Render the autopost list directly to a message.
+    
+    This is a helper function used when we need to refresh the autopost list
+    but cannot modify callback.data (it's frozen in aiogram 3).
+    """
+    try:
+        # Get user's subscriptions and balance
+        subscriptions = await autopost_sub_repo.get_user_subscriptions(user_id)
+        
+        if balance_repo:
+            balance, _ = await balance_repo.get_or_create(user_id)
+            balance_int = int(balance.balance)
+        else:
+            balance_int = 0
+        
+        if not subscriptions:
+            # No subscriptions yet
+            text = (
+                "⚡ <b>Автопостинг</b>\n\n"
+                "Автопостинг автоматически переносит <b>НОВЫЕ</b> посты "
+                "из вашего Telegram-канала в Max в реальном времени.\n\n"
+                f"Стоимость: {COST_PER_POST}₽ за каждый новый пост.\n\n"
+                "У вас пока нет активных автопостингов."
+            )
+            
+            builder = InlineKeyboardBuilder()
+            builder.button(text="➕ Подключить автопостинг", callback_data="autopost_new")
+            builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
+            builder.adjust(1)
+            
+            await message.edit_text(text, reply_markup=builder.as_markup())
+            return
+        
+        # Build subscription list text
+        lines = ["⚡ <b>Автопостинг</b>\n"]
+        
+        for sub in subscriptions:
+            status_emoji = "✅" if sub.is_active else "⏸"
+            lines.append(
+                f"{status_emoji} @{sub.tg_channel} → Max\n"
+                f"   Статус: {'активен' if sub.is_active else 'приостановлен'} | "
+                f"Перенесено: {sub.posts_transferred} постов"
+            )
+        
+        lines.append(f"\n💰 <b>Баланс:</b> {balance_int}₽")
+        
+        text = "\n".join(lines)
+        
+        # Build keyboard with subscription control buttons
+        builder = InlineKeyboardBuilder()
+        
+        for sub in subscriptions:
+            if sub.is_active:
+                builder.button(
+                    text=f"⏸ Приостановить @{sub.tg_channel[:20]}",
+                    callback_data=f"autopost_toggle:{sub.id}"
+                )
+            else:
+                builder.button(
+                    text=f"▶️ Возобновить @{sub.tg_channel[:20]}",
+                    callback_data=f"autopost_toggle:{sub.id}"
+                )
+            builder.button(
+                text=f"🗑 Отключить @{sub.tg_channel[:20]}",
+                callback_data=f"autopost_delete:{sub.id}"
+            )
+        
+        builder.button(text="➕ Подключить ещё", callback_data="autopost_new")
+        builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
+        builder.adjust(1)
+        
+        await message.edit_text(text, reply_markup=builder.as_markup())
+        
+    except Exception as e:
+        logger.error(f"Error in _render_autopost_list: {e}")
+        await message.edit_text(
+            "❌ Произошла ошибка при загрузке автопостингов. Попробуйте позже.",
+            reply_markup=back_to_menu_keyboard()
+        )
 
 
 # =============================================================================
@@ -141,8 +233,7 @@ async def toggle_autopost_handler(
             await callback.answer("▶️ Автопостинг возобновлён", show_alert=True)
         
         # Refresh the list
-        callback.data = "menu_manage_autopost"
-        await show_autopost_list(callback, autopost_sub_repo, None)
+        await _render_autopost_list(callback.message, user_id, autopost_sub_repo, None)
         
     except Exception as e:
         logger.error(f"Error in toggle_autopost_handler: {e}")
@@ -165,8 +256,7 @@ async def delete_autopost_confirm(
         
         if not sub:
             await callback.answer("❌ Автопостинг не найден", show_alert=True)
-            callback.data = "menu_manage_autopost"
-            await show_autopost_list(callback, autopost_sub_repo, None)
+            await _render_autopost_list(callback.message, user_id, autopost_sub_repo, None)
             return
         
         text = (
@@ -220,8 +310,7 @@ async def delete_autopost_handler(
             await callback.answer("❌ Не удалось отключить автопостинг", show_alert=True)
         
         # Return to list
-        callback.data = "menu_manage_autopost"
-        await show_autopost_list(callback, autopost_sub_repo, None)
+        await _render_autopost_list(callback.message, user_id, autopost_sub_repo, None)
         
     except Exception as e:
         logger.error(f"Error in delete_autopost_handler: {e}")
@@ -373,8 +462,7 @@ async def select_channel_for_autopost(
                 "⚠️ Автопостинг для этого канала уже существует",
                 show_alert=True
             )
-            callback.data = "menu_manage_autopost"
-            await show_autopost_list(callback, autopost_sub_repo, balance_repo)
+            await _render_autopost_list(callback.message, user_id, autopost_sub_repo, balance_repo)
             return
         
         # Get the Max binding for this channel
@@ -391,8 +479,7 @@ async def select_channel_for_autopost(
                 "❌ Привязка к Max не найдена. Настройте перенос сначала.",
                 show_alert=True
             )
-            callback.data = "menu_manage_autopost"
-            await show_autopost_list(callback, autopost_sub_repo, balance_repo)
+            await _render_autopost_list(callback.message, user_id, autopost_sub_repo, balance_repo)
             return
         
         # Store selection in state
@@ -461,8 +548,7 @@ async def confirm_create_autopost(
                 show_alert=True
             )
             await state.clear()
-            callback.data = "menu_manage_autopost"
-            await show_autopost_list(callback, autopost_sub_repo, balance_repo)
+            await _render_autopost_list(callback.message, user_id, autopost_sub_repo, balance_repo)
             return
         
         # Get stored channel name from state
@@ -482,6 +568,21 @@ async def confirm_create_autopost(
             # Update the subscription with the channel name if available
             # Note: This would require an update method in the repository
             pass
+        
+        # Set initial last_post_id to prevent catching up historical posts
+        manager = get_autopost_manager()
+        if manager:
+            try:
+                client = await manager.telethon_client._get_client()
+                entity = await client.get_entity(tg_channel)
+                # Get the latest message from the channel
+                messages = await client.get_messages(entity, limit=1)
+                if messages:
+                    latest_post_id = messages[0].id
+                    await autopost_sub_repo.update_last_post_id(sub.id, latest_post_id)
+                    logger.info(f"Set initial last_post_id={latest_post_id} for new subscription @{tg_channel}")
+            except Exception as e:
+                logger.warning(f"Could not set initial last_post_id: {e}")
         
         logger.info(
             f"Created new autopost subscription: user={user_id}, "
