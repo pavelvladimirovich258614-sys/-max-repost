@@ -203,8 +203,6 @@ async def toggle_autopost_handler(
     autopost_sub_repo,
 ) -> None:
     """Toggle autopost subscription active status (pause/resume)."""
-    await callback.answer()
-    
     user_id = callback.from_user.id
     subscription_id = int(callback.data.split(":", 1)[1])
     
@@ -246,8 +244,6 @@ async def delete_autopost_confirm(
     autopost_sub_repo,
 ) -> None:
     """Show confirmation for deleting autopost subscription."""
-    await callback.answer()
-    
     user_id = callback.from_user.id
     subscription_id = int(callback.data.split(":", 1)[1])
     
@@ -290,8 +286,6 @@ async def delete_autopost_handler(
     autopost_sub_repo,
 ) -> None:
     """Delete autopost subscription."""
-    await callback.answer()
-    
     user_id = callback.from_user.id
     subscription_id = int(callback.data.split(":", 1)[1])
     
@@ -448,8 +442,6 @@ async def select_channel_for_autopost(
     balance_repo,
 ) -> None:
     """Handle TG channel selection - show confirmation for autopost creation."""
-    await callback.answer()
-    
     user_id = callback.from_user.id
     tg_channel = callback.data.split(":", 1)[1]
     
@@ -531,8 +523,6 @@ async def confirm_create_autopost(
     balance_repo,
 ) -> None:
     """Create new autopost subscription after confirmation."""
-    await callback.answer()
-    
     user_id = callback.from_user.id
     parts = callback.data.split(":")
     tg_channel = parts[1]
