@@ -16,6 +16,7 @@ from bot.database.repositories.autopost_subscription import AutopostSubscription
 from bot.database.connection import get_session
 from bot.payments.yookassa_client import YooKassaClient
 from bot.payments.payment_checker import check_pending_payments
+from bot.payments.webhook_server import start_webhook_server
 from config.settings import settings
 
 
@@ -119,6 +120,17 @@ async def main() -> None:
     )
     logger.info("Payment checker started")
 
+    # Start webhook server (runs alongside polling as fallback)
+    webhook_task = None
+    if settings.webhook_enabled:
+        webhook_task = asyncio.create_task(
+            start_webhook_server(
+                host=settings.webhook_host,
+                port=settings.webhook_port,
+            )
+        )
+        logger.info("Webhook server started")
+
     # Load active autopost subscriptions
     async with get_session() as session:
         repo = AutopostSubscriptionRepository(session)
@@ -179,6 +191,19 @@ async def main() -> None:
             pass
         except Exception as e:
             logger.error(f"Payment checker error: {e}")
+        
+        # Cancel webhook server
+        if webhook_task:
+            try:
+                webhook_task.cancel()
+                await asyncio.wait_for(webhook_task, timeout=5.0)
+                logger.debug("Webhook server stopped")
+            except asyncio.TimeoutError:
+                logger.warning("Webhook server stop timed out")
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error(f"Webhook server error: {e}")
         
         # Close Max API client session
         try:

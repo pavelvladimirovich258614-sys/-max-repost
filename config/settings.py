@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     price_per_post: int = Field(default=3, alias="PRICE_PER_POST")
     free_posts_bonus: int = Field(default=10, alias="FREE_POSTS_BONUS")
 
+    # Webhook Server (for YooKassa notifications)
+    webhook_enabled: bool = Field(default=True, alias="WEBHOOK_ENABLED")
+    webhook_host: str = Field(default="0.0.0.0", alias="WEBHOOK_HOST")
+    webhook_port: int = Field(default=8080, alias="WEBHOOK_PORT")
+    yookassa_webhook_url: str = Field(default="", alias="YOOKASSA_WEBHOOK_URL")
+
 
 # Global settings instance
 settings = Settings()
