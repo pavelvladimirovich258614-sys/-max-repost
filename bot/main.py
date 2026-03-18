@@ -122,6 +122,11 @@ async def main() -> None:
     finally:
         # Graceful shutdown
         print("Shutting down...")
+        
+        # Stop all autopost tasks
+        if autopost_manager:
+            await autopost_manager.stop_all()
+        
         await max_listener.stop()
         listener_task.cancel()
         try:

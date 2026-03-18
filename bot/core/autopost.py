@@ -46,6 +46,8 @@ class AutopostManager:
     POLL_INTERVAL = 10
     # Error retry interval in seconds
     ERROR_INTERVAL = 30
+    # Album buffer wait time in seconds (time to collect all album parts)
+    ALBUM_BUFFER_WAIT = 2
     
     def __init__(self, telethon_client, max_client: MaxClient, bot=None):
         """
@@ -61,6 +63,8 @@ class AutopostManager:
         self.bot = bot
         # tg_channel -> {max_chat_id, task, user_id, subscription}
         self.active_tasks: dict[str, dict] = {}
+        # Album buffer: grouped_id -> {messages, timer_task, max_chat_id, user_id, tg_channel, subscription}
+        self._album_buffer: dict[str, dict] = {}
     
     def _should_skip_autopost(self, message: Message) -> tuple[bool, str]:
         """Check if message should be skipped for autopost.
@@ -217,7 +221,25 @@ class AutopostManager:
                                 f"id={msg.id}, text={msg.text[:50] if msg.text else '[media]'!r}"
                             )
                             
-                            # Forward the post
+                            # Check if message is part of an album
+                            if msg.grouped_id:
+                                # Add to album buffer - it will be processed when buffer is flushed
+                                await self._buffer_album_message(
+                                    msg, max_chat_id, user_id, tg_channel, subscription
+                                )
+                                # Update tracking but don't process individually
+                                last_post_id = msg.id
+                                processed_ids.add(msg.id)
+                                
+                                # Limit the size of processed_ids set to prevent memory growth
+                                if len(processed_ids) > 1000:
+                                    processed_ids = set(sorted(processed_ids)[-500:])
+                                
+                                if subscription_id:
+                                    await self._update_last_post_id(subscription_id, last_post_id)
+                                continue
+                            
+                            # Forward single (non-album) post
                             success = await self._forward_post(
                                 msg, max_chat_id, user_id, tg_channel, subscription
                             )
@@ -250,6 +272,319 @@ class AutopostManager:
                     
         except asyncio.CancelledError:
             logger.info(f"Autopost polling stopped: @{tg_channel}")
+    
+    async def _buffer_album_message(
+        self,
+        message: Message,
+        max_chat_id: int,
+        user_id: int,
+        tg_channel: str,
+        subscription: object | None,
+    ) -> None:
+        """
+        Buffer an album message and start/reset the flush timer.
+        
+        Args:
+            message: Telethon Message object (part of an album)
+            max_chat_id: Max channel chat_id
+            user_id: Telegram user ID
+            tg_channel: Telegram channel username
+            subscription: Optional AutopostSubscription object
+        """
+        grouped_id = str(message.grouped_id)
+        
+        if grouped_id not in self._album_buffer:
+            # Create new buffer entry with timer task
+            self._album_buffer[grouped_id] = {
+                "messages": [message],
+                "max_chat_id": max_chat_id,
+                "user_id": user_id,
+                "tg_channel": tg_channel,
+                "subscription": subscription,
+                "timer_task": asyncio.create_task(
+                    self._flush_album_buffer_after_delay(grouped_id)
+                ),
+            }
+            logger.info(
+                f"Album buffer created for grouped_id={grouped_id}, "
+                f"message_id={message.id}"
+            )
+        else:
+            # Add to existing buffer
+            self._album_buffer[grouped_id]["messages"].append(message)
+            logger.info(
+                f"Added message {message.id} to album buffer "
+                f"grouped_id={grouped_id}, total parts={len(self._album_buffer[grouped_id]['messages'])}"
+            )
+    
+    async def _flush_album_buffer_after_delay(self, grouped_id: str) -> None:
+        """
+        Wait for album buffer delay then flush the album.
+        
+        Args:
+            grouped_id: The grouped_id of the album to flush
+        """
+        try:
+            await asyncio.sleep(self.ALBUM_BUFFER_WAIT)
+            await self._flush_album_buffer(grouped_id)
+        except asyncio.CancelledError:
+            # Timer was cancelled, buffer will be handled elsewhere
+            pass
+    
+    async def _flush_album_buffer(self, grouped_id: str) -> None:
+        """
+        Flush an album buffer and forward all messages as a group.
+        
+        Args:
+            grouped_id: The grouped_id of the album to flush
+        """
+        if grouped_id not in self._album_buffer:
+            return
+        
+        buffer_data = self._album_buffer.pop(grouped_id)
+        messages = buffer_data["messages"]
+        max_chat_id = buffer_data["max_chat_id"]
+        user_id = buffer_data["user_id"]
+        tg_channel = buffer_data["tg_channel"]
+        subscription = buffer_data["subscription"]
+        
+        # Cancel timer task if it's still running
+        timer_task = buffer_data.get("timer_task")
+        if timer_task and not timer_task.done():
+            timer_task.cancel()
+            try:
+                await timer_task
+            except asyncio.CancelledError:
+                pass
+        
+        if not messages:
+            return
+        
+        # Sort messages by ID to maintain order
+        messages.sort(key=lambda m: m.id)
+        
+        logger.info(
+            f"Flushing album buffer: grouped_id={grouped_id}, "
+            f"{len(messages)} messages, channel=@{tg_channel}"
+        )
+        
+        # Forward the album as a group
+        await self._forward_album(
+            messages, max_chat_id, user_id, tg_channel, subscription
+        )
+    
+    async def _forward_album(
+        self,
+        messages: list[Message],
+        max_chat_id: int,
+        user_id: int,
+        tg_channel: str,
+        subscription: object | None,
+    ) -> bool:
+        """
+        Forward an album (group of media messages) to Max.
+        
+        Args:
+            messages: List of Telethon Message objects belonging to the album
+            max_chat_id: Max channel chat_id
+            user_id: Telegram user ID
+            tg_channel: Telegram channel username
+            subscription: Optional AutopostSubscription object
+            
+        Returns:
+            True if forwarded successfully, False otherwise
+        """
+        if not messages:
+            return True
+        
+        # Use the first message for text/caption and skip checks
+        first_message = messages[0]
+        
+        # 1. Filter service and empty messages
+        should_skip, skip_reason = self._should_skip_autopost(first_message)
+        if should_skip:
+            logger.info(f"Autopost: @{tg_channel} album skipped - {skip_reason}")
+            return True
+        
+        # 2. Check if user is admin (admins have unlimited access)
+        is_admin = user_id in settings.ADMIN_IDS
+        
+        # 3. If not admin - check and charge balance (charge once for the album)
+        if not is_admin:
+            async with get_session() as session:
+                success, error = await charge_autopost_with_subscription(
+                    session=session,
+                    user_id=user_id,
+                    tg_channel=tg_channel,
+                    post_id=first_message.id
+                )
+                if not success:
+                    if error == "insufficient_funds":
+                        await self._notify_insufficient_funds(user_id, tg_channel)
+                        await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
+                    return False
+        
+        # 4. Forward the album
+        try:
+            await self._do_forward_album(messages, max_chat_id)
+        except Exception as e:
+            logger.error(f"Autopost: failed to forward album from @{tg_channel}: {e}")
+            return False
+        
+        # 5. Log success
+        logger.info(f"Autopost: @{tg_channel} album with {len(messages)} parts transferred")
+        return True
+    
+    async def _do_forward_album(self, messages: list[Message], max_chat_id: int) -> None:
+        """
+        Execute the actual forwarding of an album to Max.
+        
+        Downloads all media files and sends them as a group.
+        
+        Args:
+            messages: List of Telethon Message objects belonging to the album
+            max_chat_id: Max channel chat_id
+        """
+        if not messages:
+            return
+        
+        # Get text/caption from the first message (albums have caption only on first message)
+        first_message = messages[0]
+        text = first_message.raw_text or ""
+        format_type = None
+        
+        if first_message.entities:
+            text = convert_entities_to_html(text, first_message.entities)
+            format_type = "html"
+        
+        # Collect all media attachments
+        attachments = []
+        
+        for message in messages:
+            try:
+                if message.photo:
+                    attachment = await self._download_and_prepare_photo(message)
+                    if attachment:
+                        attachments.append(attachment)
+                elif message.video:
+                    attachment = await self._download_and_prepare_video(message)
+                    if attachment:
+                        attachments.append(attachment)
+                elif message.audio or message.voice:
+                    attachment = await self._download_and_prepare_audio(message)
+                    if attachment:
+                        attachments.append(attachment)
+                elif message.document:
+                    attachment = await self._download_and_prepare_document(message)
+                    if attachment:
+                        attachments.append(attachment)
+            except Exception as e:
+                logger.error(f"Failed to prepare media from message {message.id}: {e}")
+                continue
+        
+        if not attachments:
+            # No media could be prepared, fall back to text-only
+            if text:
+                await self.max_client.send_message(
+                    chat_id=max_chat_id,
+                    text=text,
+                    format=format_type,
+                )
+            return
+        
+        try:
+            # Send all attachments as a group
+            await self.max_client.send_message(
+                chat_id=max_chat_id,
+                text=text,
+                attachments=attachments,
+                format=format_type,
+            )
+        except Exception as e:
+            logger.error(f"Failed to send album: {e}")
+            # Fallback: try sending attachments one by one
+            for attachment in attachments:
+                try:
+                    await self.max_client.send_message(
+                        chat_id=max_chat_id,
+                        text=text if attachment == attachments[0] else "",
+                        attachments=[attachment],
+                        format=format_type,
+                    )
+                except Exception as e2:
+                    logger.error(f"Failed to send individual attachment: {e2}")
+    
+    async def _download_and_prepare_photo(self, message: Message) -> dict | None:
+        """Download and prepare a photo attachment for sending."""
+        buf = io.BytesIO()
+        await message.download_media(file=buf)
+        buf.seek(0)
+        photo_bytes = buf.read()
+        
+        if not photo_bytes:
+            logger.warning(f"Empty photo bytes for message {message.id}")
+            return None
+        
+        try:
+            token = await self.max_client.upload_image(photo_bytes)
+            return {"type": "image", "payload": {"token": token}}
+        except Exception as e:
+            logger.error(f"Failed to upload photo from message {message.id}: {e}")
+            return None
+    
+    async def _download_and_prepare_video(self, message: Message) -> dict | None:
+        """Download and prepare a video attachment for sending."""
+        buf = io.BytesIO()
+        await message.download_media(file=buf)
+        buf.seek(0)
+        video_bytes = buf.read()
+        
+        if not video_bytes:
+            logger.warning(f"Empty video bytes for message {message.id}")
+            return None
+        
+        try:
+            token = await self.max_client.upload_video(video_bytes)
+            return {"type": "video", "payload": {"token": token}}
+        except Exception as e:
+            logger.error(f"Failed to upload video from message {message.id}: {e}")
+            return None
+    
+    async def _download_and_prepare_audio(self, message: Message) -> dict | None:
+        """Download and prepare an audio/voice attachment for sending."""
+        buf = io.BytesIO()
+        await message.download_media(file=buf)
+        buf.seek(0)
+        audio_bytes = buf.read()
+        
+        if not audio_bytes:
+            logger.warning(f"Empty audio bytes for message {message.id}")
+            return None
+        
+        try:
+            token = await self.max_client.upload_audio(audio_bytes)
+            return {"type": "audio", "payload": {"token": token}}
+        except Exception as e:
+            logger.error(f"Failed to upload audio from message {message.id}: {e}")
+            return None
+    
+    async def _download_and_prepare_document(self, message: Message) -> dict | None:
+        """Download and prepare a document/file attachment for sending."""
+        buf = io.BytesIO()
+        await message.download_media(file=buf)
+        buf.seek(0)
+        file_bytes = buf.read()
+        
+        if not file_bytes:
+            logger.warning(f"Empty file bytes for message {message.id}")
+            return None
+        
+        try:
+            token = await self.max_client.upload_file(file_bytes)
+            return {"type": "file", "payload": {"token": token}}
+        except Exception as e:
+            logger.error(f"Failed to upload file from message {message.id}: {e}")
+            return None
     
     async def _update_last_post_id(self, subscription_id: int, post_id: int) -> None:
         """Update last_post_id in database."""
@@ -306,15 +641,104 @@ class AutopostManager:
             # Sort by ID ascending (oldest first) to process in order
             missed_messages.sort(key=lambda m: m.id)
             
+            # Group messages by album (grouped_id)
+            album_groups: dict[int, list[Message]] = {}
+            single_messages: list[Message] = []
+            
+            for message in missed_messages:
+                if message.grouped_id:
+                    grouped_id = message.grouped_id
+                    if grouped_id not in album_groups:
+                        album_groups[grouped_id] = []
+                    album_groups[grouped_id].append(message)
+                else:
+                    single_messages.append(message)
+            
+            # Process all messages in order
             transferred_count = 0
             is_admin = user_id in settings.ADMIN_IDS
             
-            for message in missed_messages:
+            # Create a combined list with markers for processing order
+            # We need to process messages in ID order, sending albums as groups
+            all_messages = missed_messages.copy()
+            processed_grouped_ids: set[int] = set()
+            
+            for message in all_messages:
+                # Check if message is part of an album
+                if message.grouped_id:
+                    grouped_id = message.grouped_id
+                    
+                    # Skip if this album was already processed
+                    if grouped_id in processed_grouped_ids:
+                        # Still update last_post_id for album parts
+                        new_last_post_id = message.id
+                        if subscription_id:
+                            async with get_session() as session:
+                                repo = AutopostSubscriptionRepository(session)
+                                await repo.update_last_post_id(subscription_id, message.id)
+                        continue
+                    
+                    # Get all messages in this album
+                    album_messages = album_groups.get(grouped_id, [message])
+                    album_messages.sort(key=lambda m: m.id)
+                    
+                    # Check if should skip the album (check first message)
+                    should_skip, skip_reason = self._should_skip_autopost(album_messages[0])
+                    if should_skip:
+                        logger.debug(f"Catch-up: skipping album with message {message.id} - {skip_reason}")
+                        # Update last_post_id for all album parts
+                        for album_msg in album_messages:
+                            new_last_post_id = album_msg.id
+                            if subscription_id:
+                                async with get_session() as session:
+                                    repo = AutopostSubscriptionRepository(session)
+                                    await repo.update_last_post_id(subscription_id, album_msg.id)
+                        processed_grouped_ids.add(grouped_id)
+                        continue
+                    
+                    # Check balance if not admin (charge once per album)
+                    if not is_admin:
+                        async with get_session() as session:
+                            success, error = await charge_autopost_with_subscription(
+                                session=session,
+                                user_id=user_id,
+                                tg_channel=tg_channel,
+                                post_id=album_messages[0].id
+                            )
+                            if not success:
+                                if error == "insufficient_funds":
+                                    await self._notify_insufficient_funds(user_id, tg_channel)
+                                    await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
+                                logger.warning(f"Catch-up: failed to charge for album {album_messages[0].id}, stopping")
+                                # Update last_post_id before stopping
+                                for album_msg in album_messages:
+                                    new_last_post_id = album_msg.id
+                                return new_last_post_id
+                    
+                    # Forward the album
+                    try:
+                        await self._do_forward_album(album_messages, max_chat_id)
+                        transferred_count += 1
+                        
+                        # Update last_post_id for all album parts
+                        for album_msg in album_messages:
+                            new_last_post_id = album_msg.id
+                            if subscription_id:
+                                async with get_session() as session:
+                                    repo = AutopostSubscriptionRepository(session)
+                                    await repo.update_last_post_id(subscription_id, album_msg.id)
+                    except Exception as e:
+                        logger.error(f"Catch-up: failed to forward album with message {message.id}: {e}")
+                        # Continue processing other messages
+                    
+                    processed_grouped_ids.add(grouped_id)
+                    continue
+                
+                # Process single message
                 # Check if should skip
                 should_skip, skip_reason = self._should_skip_autopost(message)
                 if should_skip:
                     logger.debug(f"Catch-up: skipping message {message.id} - {skip_reason}")
-                    # Update last_post_id even for skipped messages to avoid re-processing
                     new_last_post_id = message.id
                     if subscription_id:
                         async with get_session() as session:
@@ -336,7 +760,7 @@ class AutopostManager:
                                 await self._notify_insufficient_funds(user_id, tg_channel)
                                 await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
                             logger.warning(f"Catch-up: failed to charge for message {message.id}, stopping")
-                            break
+                            return new_last_post_id
                 
                 # Forward the post
                 try:
@@ -401,12 +825,32 @@ class AutopostManager:
                 except asyncio.CancelledError:
                     pass
             
+            # Flush any pending albums for this channel
+            await self._flush_pending_albums_for_channel(tg_channel)
+            
             logger.info(f"Autopost stopped: {tg_channel}")
             return True
             
         except Exception as e:
             logger.error(f"Failed to stop autopost for {tg_channel}: {e}")
             return False
+    
+    async def _flush_pending_albums_for_channel(self, tg_channel: str) -> None:
+        """
+        Flush any pending album buffers for a specific channel.
+        
+        Args:
+            tg_channel: Telegram channel username
+        """
+        grouped_ids_to_flush = []
+        
+        for grouped_id, buffer_data in self._album_buffer.items():
+            if buffer_data["tg_channel"] == tg_channel:
+                grouped_ids_to_flush.append(grouped_id)
+        
+        for grouped_id in grouped_ids_to_flush:
+            logger.info(f"Flushing pending album buffer for channel @{tg_channel}: grouped_id={grouped_id}")
+            await self._flush_album_buffer(grouped_id)
     
     async def _forward_post(
         self, 

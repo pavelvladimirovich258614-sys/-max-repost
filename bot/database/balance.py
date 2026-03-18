@@ -6,7 +6,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.database.models import User, AutopostSubscription
+from bot.database.models import User, AutopostSubscription, BalanceTransaction
 from bot.database.repositories.user import UserRepository
 from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
 
@@ -138,6 +138,15 @@ async def charge_autopost_with_subscription(
     if result is None:
         logger.error(f"Charge failed: could not update balance for user {user_id}")
         return False, "update_failed"
+    
+    # Create transaction record
+    transaction = BalanceTransaction(
+        user_id=user_id,
+        amount=-AUTOPOST_COST_RUBLES,
+        transaction_type="autopost_charge",
+        description=f"Autopost charge for @{tg_channel} post #{post_id}",
+    )
+    session.add(transaction)
     
     # Update subscription stats
     await sub_repo.increment_posts_count(subscription.id, AUTOPOST_COST_RUBLES)
