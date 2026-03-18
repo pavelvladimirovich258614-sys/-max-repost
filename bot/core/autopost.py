@@ -1,5 +1,7 @@
 """Autoposting manager for automatic forwarding of new posts from TG to Max."""
 
+from __future__ import annotations
+
 import asyncio
 import io
 from decimal import Decimal
@@ -15,6 +17,20 @@ from bot.database.balance import get_balance, charge_autopost_with_subscription
 from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
 from bot.database.connection import get_session
 from config.settings import settings
+
+# Singleton instance storage
+_autopost_manager: AutopostManager | None = None
+
+
+def set_autopost_manager(manager: AutopostManager) -> None:
+    """Set the global autopost manager singleton instance."""
+    global _autopost_manager
+    _autopost_manager = manager
+
+
+def get_autopost_manager() -> AutopostManager | None:
+    """Get the global autopost manager singleton instance."""
+    return _autopost_manager
 
 
 class AutopostManager:
