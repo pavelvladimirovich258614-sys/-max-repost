@@ -112,18 +112,21 @@ class AutopostManager:
             entity = await client.get_entity(tg_channel)
             
             # Catch-up logic: process missed posts before starting polling
+            # Returns the updated last_post_id after catch-up
+            initial_last_post_id = None
             try:
-                await self._catch_up_missed_posts(
+                initial_last_post_id = await self._catch_up_missed_posts(
                     client, entity, tg_channel, max_chat_id, user_id, subscription
                 )
             except Exception as e:
                 logger.error(f"Catch-up failed for {tg_channel}: {e}")
                 # Continue with monitoring even if catch-up fails
             
-            # Start polling task
+            # Start polling task with the updated last_post_id from catch-up
+            # This prevents duplicate processing of posts handled during catch-up
             task = asyncio.create_task(
                 self._monitor_channel_polling(
-                    tg_channel, max_chat_id, user_id, subscription
+                    tg_channel, max_chat_id, user_id, subscription, initial_last_post_id
                 )
             )
             
@@ -148,6 +151,7 @@ class AutopostManager:
         max_chat_id: int,
         user_id: int,
         subscription: object | None,
+        initial_last_post_id: int | None = None,
     ) -> None:
         """
         Monitor channel for new posts via polling.
@@ -160,15 +164,26 @@ class AutopostManager:
             max_chat_id: Max channel chat_id
             user_id: Telegram user ID who owns this autopost
             subscription: Optional AutopostSubscription object
+            initial_last_post_id: Optional initial last_post_id from catch-up
+                                  (prevents duplicate processing on startup)
         """
-        # Get initial last_post_id from subscription
-        last_post_id = getattr(subscription, 'last_post_id', None) or 0
+        # Get initial last_post_id from catch-up result or subscription
+        # initial_last_post_id is preferred as it's updated after catch-up processing
+        if initial_last_post_id is not None:
+            last_post_id = initial_last_post_id
+        else:
+            last_post_id = getattr(subscription, 'last_post_id', None) or 0
+        
         subscription_id = getattr(subscription, 'id', None)
         
         logger.info(
             f"Autopost polling task started: @{tg_channel}, "
             f"last_post_id={last_post_id}, interval={self.POLL_INTERVAL}s"
         )
+        
+        # Track recently processed message IDs to prevent duplicates
+        # This protects against edge cases where the same message might be processed twice
+        processed_ids: set[int] = set()
         
         try:
             while True:
@@ -183,7 +198,9 @@ class AutopostManager:
                         min_id=last_post_id,
                         limit=50,
                     ):
-                        if msg.id > last_post_id:
+                        # Strict check: msg.id must be greater than last_post_id
+                        # and not in processed_ids (extra protection against duplicates)
+                        if msg.id > last_post_id and msg.id not in processed_ids:
                             new_messages.append(msg)
                     
                     if new_messages:
@@ -205,9 +222,15 @@ class AutopostManager:
                                 msg, max_chat_id, user_id, tg_channel, subscription
                             )
                             
-                            # Update last_post_id on success
+                            # Update last_post_id and track processed IDs on success
                             if success:
                                 last_post_id = msg.id
+                                processed_ids.add(msg.id)
+                                
+                                # Limit the size of processed_ids set to prevent memory growth
+                                if len(processed_ids) > 1000:
+                                    processed_ids = set(sorted(processed_ids)[-500:])
+                                
                                 if subscription_id:
                                     await self._update_last_post_id(subscription_id, last_post_id)
                     
@@ -245,7 +268,7 @@ class AutopostManager:
         max_chat_id: int,
         user_id: int,
         subscription: object | None,
-    ) -> None:
+    ) -> int | None:
         """
         Catch up missed posts that were published while autopost was paused.
         
@@ -256,13 +279,18 @@ class AutopostManager:
             max_chat_id: Max channel chat_id
             user_id: Telegram user ID
             subscription: AutopostSubscription object with last_post_id
+            
+        Returns:
+            The last processed post_id (for passing to polling task to prevent duplicates),
+            or None if no subscription/no posts processed
         """
         if subscription is None:
             logger.debug(f"No subscription provided for {tg_channel}, skipping catch-up")
-            return
+            return None
         
         subscription_id = getattr(subscription, 'id', None)
         last_post_id = getattr(subscription, 'last_post_id', None)
+        new_last_post_id = last_post_id
         
         if last_post_id is not None:
             # Get recent messages and filter missed ones
@@ -273,7 +301,7 @@ class AutopostManager:
             
             if not missed_messages:
                 logger.info(f"No missed posts for @{tg_channel}")
-                return
+                return last_post_id
             
             # Sort by ID ascending (oldest first) to process in order
             missed_messages.sort(key=lambda m: m.id)
@@ -286,6 +314,12 @@ class AutopostManager:
                 should_skip, skip_reason = self._should_skip_autopost(message)
                 if should_skip:
                     logger.debug(f"Catch-up: skipping message {message.id} - {skip_reason}")
+                    # Update last_post_id even for skipped messages to avoid re-processing
+                    new_last_post_id = message.id
+                    if subscription_id:
+                        async with get_session() as session:
+                            repo = AutopostSubscriptionRepository(session)
+                            await repo.update_last_post_id(subscription_id, message.id)
                     continue
                 
                 # Check balance if not admin
@@ -308,6 +342,7 @@ class AutopostManager:
                 try:
                     await self._do_forward(message, max_chat_id)
                     transferred_count += 1
+                    new_last_post_id = message.id
                     
                     # Update last_post_id in database
                     if subscription_id:
@@ -319,6 +354,7 @@ class AutopostManager:
                     continue
             
             logger.info(f"Catch-up: transferred {transferred_count} missed posts for @{tg_channel}")
+            return new_last_post_id
         else:
             # First start: get the latest message ID and set it as last_post_id
             latest_message = None
@@ -331,8 +367,10 @@ class AutopostManager:
                     repo = AutopostSubscriptionRepository(session)
                     await repo.update_last_post_id(subscription_id, latest_message.id)
                 logger.info(f"First start: setting last_post_id to {latest_message.id} for @{tg_channel}")
+                return latest_message.id
             else:
                 logger.info(f"First start: no messages found in @{tg_channel}")
+                return None
     
     async def stop_autopost(self, tg_channel: str) -> bool:
         """
