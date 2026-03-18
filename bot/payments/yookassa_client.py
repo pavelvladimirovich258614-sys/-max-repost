@@ -51,7 +51,7 @@ class YooKassaClient:
                     "type": "redirect",
                     "return_url": settings.yookassa_return_url
                 },
-                "description": description,
+                "description": f"Услуга переноса публикаций — {int(amount_rub)}₽",
                 "metadata": {
                     "user_id": str(user_id),
                     "amount": str(amount_rub)
@@ -63,7 +63,7 @@ class YooKassaClient:
                     },
                     "items": [
                         {
-                            "description": "Пополнение баланса бота Max-Repost",
+                            "description": "Услуга автоматического переноса публикаций (Max-Repost)",
                             "quantity": "1.00",
                             "amount": {
                                 "value": str(amount_rub),
@@ -71,7 +71,8 @@ class YooKassaClient:
                             },
                             "vat_code": 1,  # 1 = без НДС
                             "payment_mode": "full_payment",
-                            "payment_subject": "service"
+                            "payment_subject": "service",
+                            "measure": "piece"
                         }
                     ]
                 }

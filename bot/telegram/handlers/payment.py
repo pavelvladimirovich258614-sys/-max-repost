@@ -221,6 +221,7 @@ async def callback_check_payment(
     # Get payment from DB
     payment = await yookassa_payment_repo.get_by_payment_id(payment_id)
     if not payment:
+        await callback.answer("Платёж не найден", show_alert=True)
         await callback.message.edit_text(
             "❌ Платёж не найден",
             reply_markup=back_to_balance_keyboard(),
@@ -265,11 +266,12 @@ async def callback_check_payment(
             )
         else:
             # Already processed
+            await callback.answer("Оплата уже зачислена!", show_alert=True)
             user_balance = await balance_repo.get_by_user_id(payment.user_id)
             new_balance = int(user_balance.balance) if user_balance else 0
             
             await callback.message.edit_text(
-                f"✅ <b>Оплата уже была обработана</b>\n\n"
+                f"✅ Оплата уже зачислена!\n"
                 f"Сумма: {int(payment.amount)}₽\n"
                 f"Баланс: {new_balance}₽",
                 parse_mode="HTML",
@@ -277,6 +279,7 @@ async def callback_check_payment(
             )
             
     elif status == "pending":
+        await callback.answer("Оплата ещё обрабатывается", show_alert=True)
         await callback.message.edit_text(
             f"⏳ <b>Оплата в обработке</b>\n\n"
             f"Платёж ещё не прошёл.\n"
@@ -291,6 +294,7 @@ async def callback_check_payment(
         )
         
     elif status == "canceled":
+        await callback.answer("Оплата была отменена", show_alert=True)
         await yookassa_payment_repo.update_status(payment_id, "canceled")
         await callback.message.edit_text(
             "❌ <b>Платёж отменён</b>",
@@ -299,6 +303,7 @@ async def callback_check_payment(
         )
         
     else:
+        await callback.answer("Не удалось проверить статус", show_alert=True)
         await callback.message.edit_text(
             "❌ Не удалось проверить статус платежа. Попробуйте позже.",
             reply_markup=back_to_balance_keyboard(),

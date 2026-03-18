@@ -17,7 +17,10 @@ from bot.database.repositories import (
     LogRepository,
     VerifiedChannelRepository,
 )
-from bot.database.repositories.balance import UserBalanceRepository
+from bot.database.repositories.balance import (
+    UserBalanceRepository,
+    BalanceTransactionRepository,
+)
 from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
 from bot.database.repositories.max_channel_binding import MaxChannelBindingRepository
 from bot.database.repositories.yookassa_payment import YooKassaPaymentRepository
@@ -63,6 +66,7 @@ class DBMiddleware(BaseMiddleware):
             data["log_repo"] = LogRepository(session)
             data["verified_channel_repo"] = VerifiedChannelRepository(session)
             data["balance_repo"] = UserBalanceRepository(session)
+            data["transaction_repo"] = BalanceTransactionRepository(session)
             data["autopost_sub_repo"] = AutopostSubscriptionRepository(session)
             data["max_binding_repo"] = MaxChannelBindingRepository(session)
             data["yookassa_payment_repo"] = YooKassaPaymentRepository(session)
