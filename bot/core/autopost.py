@@ -9,7 +9,7 @@ from loguru import logger
 from telethon import events
 from telethon.tl.types import Message
 
-from bot.core.transfer_engine import convert_entities_to_html
+from bot.core.transfer_engine import convert_entities_to_html, should_skip_message
 from bot.max_api.client import MaxClient
 from bot.database.balance import get_balance, charge_autopost_with_subscription
 from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
@@ -144,10 +144,16 @@ class AutopostManager:
             user_id: Telegram user ID
             tg_channel: Telegram channel username
         """
-        # 1. Check if user is admin (admins have unlimited access)
+        # 1. Filter junk messages (short replies, service messages)
+        should_skip, skip_reason = should_skip_message(message, post_index=message.id)
+        if should_skip:
+            logger.info(f"Autopost: @{tg_channel} post #{message.id} skipped - {skip_reason}")
+            return
+        
+        # 2. Check if user is admin (admins have unlimited access)
         is_admin = user_id in settings.ADMIN_IDS
         
-        # 2. If not admin - check and charge balance
+        # 3. If not admin - check and charge balance
         if not is_admin:
             async with get_session() as session:
                 success, error = await charge_autopost_with_subscription(
@@ -163,13 +169,11 @@ class AutopostManager:
                         await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
                     return
         
-        # 3. Forward the post (existing logic)
+        # 4. Forward the post
         await self._do_forward(message, max_chat_id)
         
-        logger.info(
-            f"Autopost: @{tg_channel} post #{message.id} -> Max, "
-            f"charged 3₽ (admin: {is_admin})"
-        )
+        # 5. Log success
+        logger.info(f"Autopost: @{tg_channel} post #{message.id} transferred")
     
     async def _do_forward(self, message: Message, max_chat_id: int) -> None:
         """
@@ -475,6 +479,54 @@ class AutopostManager:
                 # Note: actual autopost restart should be done via start_autopost
                 # with proper max_chat_id from subscription
                 return True
+        return False
+    
+    async def start_monitoring(self, subscription) -> bool:
+        """
+        Start monitoring a subscription.
+        
+        Wrapper method that accepts a subscription object and starts
+        autoposting for it.
+        
+        Args:
+            subscription: AutopostSubscription model instance
+            
+        Returns:
+            True if started successfully, False otherwise
+        """
+        return await self.start_autopost(
+            tg_channel=subscription.tg_channel,
+            max_chat_id=subscription.max_chat_id,
+            user_id=subscription.user_id,
+        )
+    
+    async def stop_monitoring(self, subscription_id: int) -> bool:
+        """
+        Stop monitoring by subscription ID.
+        
+        Finds the subscription in the database and stops autoposting.
+        
+        Args:
+            subscription_id: Subscription ID from database
+            
+        Returns:
+            True if stopped successfully, False otherwise
+        """
+        async with get_session() as session:
+            repo = AutopostSubscriptionRepository(session)
+            # Get subscription to find channel name
+            from bot.database.models import AutopostSubscription
+            from sqlalchemy import select
+            
+            stmt = select(AutopostSubscription).where(
+                AutopostSubscription.id == subscription_id
+            )
+            result = await session.execute(stmt)
+            subscription = result.scalars().first()
+            
+            if subscription:
+                return await self.stop_autopost(subscription.tg_channel)
+        
         return False
     
     def get_active_channels(self) -> list[dict]:

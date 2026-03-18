@@ -14,6 +14,8 @@ from bot.telegram.keyboards.main import (
     balance_keyboard,
 )
 from bot.database.repositories.balance import UserBalanceRepository
+from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
+from config.settings import settings
 
 # Create router
 start_router = Router(name="start")
@@ -130,6 +132,8 @@ async def cmd_menu(
     channel_repo,
     verified_channel_repo,
     transferred_post_repo,
+    autopost_sub_repo: AutopostSubscriptionRepository,
+    balance_repo: UserBalanceRepository,
 ) -> None:
     """
     Handle /menu command.
@@ -139,10 +143,11 @@ async def cmd_menu(
 
     Args:
         message: Telegram message
-        user_repo: User repository from middleware
-        channel_repo: Channel repository for counting channels
+        user_repo: User repository from counting channels
         verified_channel_repo: Repository for verified channels
         transferred_post_repo: Repository for transferred posts
+        autopost_sub_repo: Repository for autopost subscriptions
+        balance_repo: Repository for user balance
     """
     user = await user_repo.get_by_telegram_id(message.from_user.id)
 
@@ -152,7 +157,7 @@ async def cmd_menu(
 
     # Get stats
     verified_count = 0
-    total_transferred = 0
+    active_autopost_count = 0
     
     try:
         # Count verified channels
@@ -161,14 +166,40 @@ async def cmd_menu(
     except Exception as e:
         logger.debug(f"Could not get verified channels count: {e}")
     
-    # Calculate free remaining
-    free_remaining = max(0, 5 - user.free_posts_used)
-
-    menu_text = (
-        f"<b>👤 Личный кабинет</b>\n\n"
-        f"📢 Каналов: {verified_count}\n"
-        f"🎁 Баланс: {free_remaining} бесплатных постов\n"
-    )
+    try:
+        # Count active autopost subscriptions
+        subscriptions = await autopost_sub_repo.get_user_subscriptions(message.from_user.id)
+        active_autopost_count = len([s for s in subscriptions if s.is_active])
+    except Exception as e:
+        logger.debug(f"Could not get autopost subscriptions count: {e}")
+    
+    # Check if user is admin
+    is_admin = message.from_user.id in settings.ADMIN_IDS
+    
+    if is_admin:
+        # Admin view
+        menu_text = (
+            f"<b>👤 Личный кабинет (👑 Админ)</b>\n\n"
+            f"📢 Каналов: {verified_count}\n"
+            f"♾️ Безлимитный перенос и автопостинг\n"
+            f"⚡ Автопостингов: {active_autopost_count}"
+        )
+    else:
+        # Regular user view
+        # Get balance
+        balance = 0
+        try:
+            user_balance, _ = await balance_repo.get_or_create(message.from_user.id)
+            balance = int(user_balance.balance)
+        except Exception as e:
+            logger.debug(f"Could not get user balance: {e}")
+        
+        menu_text = (
+            f"<b>👤 Личный кабинет</b>\n\n"
+            f"📢 Каналов: {verified_count}\n"
+            f"💰 Баланс: {balance}₽\n"
+            f"⚡ Автопостингов: {active_autopost_count}"
+        )
 
     await message.answer(
         menu_text,
@@ -295,6 +326,8 @@ async def callback_goto_menu(
     callback: CallbackQuery,
     user_repo,
     verified_channel_repo,
+    autopost_sub_repo: AutopostSubscriptionRepository,
+    balance_repo: UserBalanceRepository,
 ) -> None:
     """Handle 'Back to menu' navigation."""
     # Answer callback FIRST before any async operations
@@ -307,6 +340,7 @@ async def callback_goto_menu(
 
     # Get stats
     verified_count = 0
+    active_autopost_count = 0
     
     try:
         # Count verified channels
@@ -315,14 +349,40 @@ async def callback_goto_menu(
     except Exception as e:
         logger.debug(f"Could not get verified channels count: {e}")
     
-    # Calculate free remaining
-    free_remaining = max(0, 5 - user.free_posts_used)
-
-    menu_text = (
-        f"<b>👤 Личный кабинет</b>\n\n"
-        f"📢 Каналов: {verified_count}\n"
-        f"🎁 Баланс: {free_remaining} бесплатных постов\n"
-    )
+    try:
+        # Count active autopost subscriptions
+        subscriptions = await autopost_sub_repo.get_user_subscriptions(callback.from_user.id)
+        active_autopost_count = len([s for s in subscriptions if s.is_active])
+    except Exception as e:
+        logger.debug(f"Could not get autopost subscriptions count: {e}")
+    
+    # Check if user is admin
+    is_admin = callback.from_user.id in settings.ADMIN_IDS
+    
+    if is_admin:
+        # Admin view
+        menu_text = (
+            f"<b>👤 Личный кабинет (👑 Админ)</b>\n\n"
+            f"📢 Каналов: {verified_count}\n"
+            f"♾️ Безлимитный перенос и автопостинг\n"
+            f"⚡ Автопостингов: {active_autopost_count}"
+        )
+    else:
+        # Regular user view
+        # Get balance
+        balance = 0
+        try:
+            user_balance, _ = await balance_repo.get_or_create(callback.from_user.id)
+            balance = int(user_balance.balance)
+        except Exception as e:
+            logger.debug(f"Could not get user balance: {e}")
+        
+        menu_text = (
+            f"<b>👤 Личный кабинет</b>\n\n"
+            f"📢 Каналов: {verified_count}\n"
+            f"💰 Баланс: {balance}₽\n"
+            f"⚡ Автопостингов: {active_autopost_count}"
+        )
 
     await callback.message.edit_text(
         menu_text,

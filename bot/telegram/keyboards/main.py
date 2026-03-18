@@ -37,7 +37,7 @@ def menu_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
 
     builder.button(text="📥 Перенос постов", callback_data="menu_new_transfer")
-    builder.button(text="⚡ Автопостинг", callback_data="menu_new_autopost")
+    builder.button(text="⚡ Автопостинг", callback_data="menu_manage_autopost")
     builder.button(text="💰 Баланс", callback_data="menu_balance")
     builder.button(text="📢 Мои каналы", callback_data="menu_my_channels")
     builder.button(text="❓ Инструкция", callback_data="menu_help")

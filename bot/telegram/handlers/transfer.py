@@ -1523,24 +1523,11 @@ async def _execute_transfer(
             logger.debug(f"Could not send sticker: {e}")
 
         # Build final result message
-        result_lines = [
-            f"✅ <b>Перенос завершён!</b>\n\n"
-            f"📺 Канал: {channel_title}\n"
-            f"✅ Перенесено: {result.success} постов"
-        ]
-        
-        # Show errors only if > 0
-        if result.failed > 0:
-            result_lines.append(f"❌ Ошибок: {result.failed}")
-        
-        # Show duplicates only if > 0
-        if result.duplicates > 0:
-            result_lines.append(f"🔄 Дубликатов пропущено: {result.duplicates}")
-        
-        result_text = "\n".join(result_lines)
-        
-        # Add prompt for autoposting
-        result_text += "\n\n⚡ Хотите настроить автопостинг новых постов?"
+        result_text = (
+            f"✅ <b>Перенос завершён: {result.success} постов</b>\n\n"
+            f"⚡ Хотите подключить автопостинг?\n"
+            f"Новые посты будут автоматически появляться в Max."
+        )
 
         # Create keyboard with autopost options
         builder = InlineKeyboardBuilder()
