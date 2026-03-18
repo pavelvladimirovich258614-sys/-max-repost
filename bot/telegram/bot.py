@@ -16,6 +16,7 @@ from bot.telegram.handlers.start import start_router
 from bot.telegram.handlers.autopost import autopost_router
 from bot.telegram.handlers.transfer import transfer_router
 from bot.telegram.handlers.channels import channels_router
+from bot.telegram.handlers.payment import payment_router
 
 
 def create_bot() -> Bot:
@@ -55,6 +56,7 @@ def setup_dispatcher(bot: Bot) -> Dispatcher:
     dp.include_router(autopost_router)
     dp.include_router(transfer_router)
     dp.include_router(channels_router)
+    dp.include_router(payment_router)
 
     # Setup lifecycle handlers
     @dp.startup()

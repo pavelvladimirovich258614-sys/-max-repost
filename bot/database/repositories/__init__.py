@@ -15,6 +15,7 @@ from bot.database.repositories.balance import (
     BalanceTransactionRepository,
 )
 from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
+from bot.database.repositories.yookassa_payment import YooKassaPaymentRepository
 
 __all__ = [
     "BaseRepository",
@@ -31,4 +32,5 @@ __all__ = [
     "UserBalanceRepository",
     "BalanceTransactionRepository",
     "AutopostSubscriptionRepository",
+    "YooKassaPaymentRepository",
 ]

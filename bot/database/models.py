@@ -618,6 +618,61 @@ class AutopostSubscription(Base):
         )
 
 
+class YooKassaPayment(Base):
+    """
+    YooKassa payment tracking for balance top-ups.
+    
+    Attributes:
+        id: Primary key
+        user_id: Telegram user ID
+        payment_id: YooKassa payment ID (unique)
+        amount: Amount in rubles (Decimal)
+        status: pending/succeeded/canceled
+        created_at: When payment was created
+        updated_at: When payment was last updated
+    """
+    
+    __tablename__ = "yookassa_payments"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        index=True,
+    )
+    payment_id: Mapped[str] = mapped_column(
+        String(100),
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+    amount: Mapped[Decimal] = mapped_column(
+        DECIMAL(10, 2),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        default="pending",
+        nullable=False,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    
+    __table_args__ = (
+        Index("ix_yookassa_payments_user_created", "user_id", "created_at"),
+    )
+
+
 class Log(Base):
     """
     Audit log for user actions.

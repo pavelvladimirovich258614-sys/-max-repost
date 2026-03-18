@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     # YooKassa Payment
     yookassa_shop_id: str = Field(..., alias="YOOKASSA_SHOP_ID")
     yookassa_secret_key: str = Field(..., alias="YOOKASSA_SECRET_KEY")
+    yookassa_return_url: str = Field(default="https://t.me/maxx_repost_bot", alias="YOOKASSA_RETURN_URL")
 
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

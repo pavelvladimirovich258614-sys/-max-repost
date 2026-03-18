@@ -14,6 +14,8 @@ from bot.core.autopost import AutopostManager, set_autopost_manager
 from bot.core.telethon_client import TelethonChannelClient
 from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
 from bot.database.connection import get_session
+from bot.payments.yookassa_client import YooKassaClient
+from bot.payments.payment_checker import check_pending_payments
 from config.settings import settings
 
 
@@ -96,6 +98,15 @@ async def main() -> None:
     set_autopost_manager(autopost_manager)
     logger.info("AutopostManager initialized")
 
+    # Initialize YooKassa client
+    yookassa_client = YooKassaClient()
+    
+    # Start payment checker background task
+    payment_checker_task = asyncio.create_task(
+        check_pending_payments(yookassa_client, bot)
+    )
+    logger.info("Payment checker started")
+
     # Load active autopost subscriptions
     async with get_session() as session:
         repo = AutopostSubscriptionRepository(session)
@@ -144,6 +155,18 @@ async def main() -> None:
             pass
         except Exception as e:
             logger.error(f"Max listener task error: {e}")
+        
+        # Cancel payment checker
+        try:
+            payment_checker_task.cancel()
+            await asyncio.wait_for(payment_checker_task, timeout=5.0)
+            logger.debug("Payment checker stopped")
+        except asyncio.TimeoutError:
+            logger.warning("Payment checker stop timed out")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Payment checker error: {e}")
         
         # Close Max API client session
         try:
