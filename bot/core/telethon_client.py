@@ -103,7 +103,28 @@ class TelethonChannelClient:
                 )
 
             logger.info(f"Telethon connected with user session: {self.phone}")
+            
+            # Start the client in the background to enable event listening
+            # This is needed for NewMessage events to work
+            import asyncio
+            asyncio.create_task(self._keep_client_alive())
+            logger.info("Telethon client event loop started in background")
+            
         return self._client
+    
+    async def _keep_client_alive(self) -> None:
+        """Keep client connected and listening for events."""
+        try:
+            # catch_up() processes any missed updates
+            await self._client.catch_up()
+            logger.info("Telethon client caught up with missed updates")
+            
+            # Keep the client alive - run_until_disconnected blocks until disconnect
+            await self._client.run_until_disconnected()
+        except Exception as e:
+            logger.error(f"Telethon client event loop error: {e}", exc_info=True)
+        finally:
+            logger.warning("Telethon client event loop ended")
 
     async def close(self) -> None:
         """Close the Telethon client."""

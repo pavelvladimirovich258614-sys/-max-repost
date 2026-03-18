@@ -117,6 +117,7 @@ class AutopostManager:
             @client.on(events.NewMessage(chats=entity))
             async def handler(event):
                 """Handle new messages in the channel."""
+                logger.info(f"Event received: {type(event).__name__} from channel_id={event.chat_id if hasattr(event, 'chat_id') else 'unknown'}")
                 try:
                     await self._forward_post(
                         event.message, 
@@ -126,7 +127,9 @@ class AutopostManager:
                         subscription
                     )
                 except Exception as e:
-                    logger.error(f"Autopost error for {tg_channel}: {e}")
+                    logger.error(f"Autopost error for {tg_channel}: {e}", exc_info=True)
+            
+            logger.info(f"Registered NewMessage handler for channel: {tg_channel} (entity_id={entity.id})")
             
             # Store task info
             self.active_tasks[tg_channel] = {
