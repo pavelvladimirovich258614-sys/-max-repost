@@ -30,7 +30,7 @@ async def init_db() -> None:
     # Run migrations for new columns
     await _run_column_migrations()
     
-    print("Database initialized (tables created if not exist)")
+    logger.info("Database initialized (tables created if not exist)")
 
 
 async def _run_column_migrations() -> None:
@@ -56,10 +56,10 @@ async def _run_column_migrations() -> None:
                 await conn.execute(
                     text("ALTER TABLE users ADD COLUMN free_posts_used INTEGER NOT NULL DEFAULT 0")
                 )
-                print("Migration: Added free_posts_used column to users table")
+                logger.info("Migration: Added free_posts_used column to users table")
         except Exception as e:
             # If anything fails, log it but don't stop the bot
-            print(f"Migration warning (non-critical): {e}")
+            logger.warning(f"Migration warning (non-critical): {e}")
 
 
 async def main() -> None:
@@ -72,7 +72,7 @@ async def main() -> None:
     """
     # Initialize logger
     init_logger()
-    print("Max-Repost Bot starting...")
+    logger.info("Max-Repost Bot starting...")
 
     # Initialize database (create tables)
     await init_db()
@@ -94,7 +94,7 @@ async def main() -> None:
     max_client = MaxClient(settings.max_access_token)
     autopost_manager = AutopostManager(telethon_client, max_client, bot)
     set_autopost_manager(autopost_manager)
-    print("AutopostManager initialized")
+    logger.info("AutopostManager initialized")
 
     # Load active autopost subscriptions
     async with get_session() as session:
@@ -107,10 +107,9 @@ async def main() -> None:
     # Start Max bot listener (responds to messages in Max messenger)
     max_listener = MaxBotListener(settings.max_access_token)
     listener_task = asyncio.create_task(max_listener.start())
-    print("Max bot listener started")
+    logger.info("Max bot listener started")
 
     # Start polling and Telethon event loop in parallel
-    # Both must run in the same asyncio event loop for Telethon events to work
     try:
         await asyncio.gather(
             dp.start_polling(
@@ -119,27 +118,48 @@ async def main() -> None:
             ),
             telethon_client.run_until_disconnected(),
         )
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        logger.info("Received shutdown signal")
+    except Exception as e:
+        logger.error(f"Main loop error: {e}", exc_info=True)
     finally:
         # Graceful shutdown
-        print("Shutting down...")
+        logger.info("Shutting down...")
         
         # Stop all autopost tasks
         if autopost_manager:
-            await autopost_manager.stop_all()
+            try:
+                await asyncio.wait_for(autopost_manager.stop_all(), timeout=15.0)
+            except asyncio.TimeoutError:
+                logger.warning("Autopost manager stop timed out")
         
-        await max_listener.stop()
-        listener_task.cancel()
+        # Stop Max listener
         try:
-            await listener_task
+            await max_listener.stop()
+            listener_task.cancel()
+            await asyncio.wait_for(listener_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("Max listener task stop timed out")
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.error(f"Max listener task failed: {e}", exc_info=True)
+            logger.error(f"Max listener task error: {e}")
+        
+        # Close Max API client session
+        try:
+            await max_client.close()
+            logger.debug("Max API client closed")
+        except Exception as e:
+            logger.error(f"Error closing Max API client: {e}")
         
         # Disconnect Telethon client
-        await telethon_client.close()
+        try:
+            await telethon_client.close()
+            logger.debug("Telethon client closed")
+        except Exception as e:
+            logger.error(f"Error closing Telethon client: {e}")
         
-        print("Max-Repost Bot stopped")
+        logger.info("Max-Repost Bot stopped")
 
 
 if __name__ == "__main__":

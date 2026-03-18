@@ -1267,6 +1267,43 @@ class AutopostManager:
         
         return False
     
+    async def stop_all(self) -> None:
+        """
+        Stop all active autopost tasks.
+        
+        Used during graceful shutdown to stop all polling tasks.
+        """
+        if not self.active_tasks:
+            logger.debug("No active autopost tasks to stop")
+            return
+        
+        logger.info(f"Stopping {len(self.active_tasks)} autopost tasks...")
+        
+        # Get all tasks to cancel
+        tasks_to_cancel = []
+        for tg_channel, task_info in list(self.active_tasks.items()):
+            task = task_info.get("task")
+            if task and not task.done():
+                task.cancel()
+                tasks_to_cancel.append(task)
+        
+        # Wait for all tasks to complete (with timeout)
+        if tasks_to_cancel:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks_to_cancel, return_exceptions=True),
+                    timeout=10.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Some autopost tasks did not stop within timeout")
+        
+        # Flush any pending albums
+        for grouped_id in list(self._album_buffer.keys()):
+            await self._flush_album_buffer(grouped_id)
+        
+        self.active_tasks.clear()
+        logger.info("All autopost tasks stopped")
+    
     def get_active_channels(self) -> list[dict]:
         """
         Get list of active autoposting channels.
