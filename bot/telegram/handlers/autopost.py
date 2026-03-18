@@ -62,9 +62,9 @@ async def show_autopost_list(
     
     try:
         # Get user's subscriptions and balance
-        subscriptions = await autopost_sub_repo.get_by_user_id(user_id)
-        balance = await balance_repo.get_or_create(user_id)
-        balance_str = f"{int(balance.balance_rub)}₽"
+        subscriptions = await autopost_sub_repo.get_user_subscriptions(user_id)
+        balance, _ = await balance_repo.get_or_create(user_id)
+        balance_str = f"{int(balance.balance)}₽"
         
         if subscriptions:
             # Build subscription list text

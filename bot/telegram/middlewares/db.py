@@ -19,6 +19,7 @@ from bot.database.repositories import (
 )
 from bot.database.repositories.balance import UserBalanceRepository
 from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
+from bot.database.repositories.max_channel_binding import MaxChannelBindingRepository
 
 
 class DBMiddleware(BaseMiddleware):
@@ -62,5 +63,6 @@ class DBMiddleware(BaseMiddleware):
             data["verified_channel_repo"] = VerifiedChannelRepository(session)
             data["balance_repo"] = UserBalanceRepository(session)
             data["autopost_sub_repo"] = AutopostSubscriptionRepository(session)
+            data["max_binding_repo"] = MaxChannelBindingRepository(session)
 
             return await handler(event, data)

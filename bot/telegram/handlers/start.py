@@ -219,7 +219,7 @@ async def callback_balance(
     user_id = callback.from_user.id
     
     # Get user balance from UserBalanceRepository
-    user_balance = await balance_repo.get_or_create(user_id)
+    user_balance, _ = await balance_repo.get_or_create(user_id)
     
     # Build balance text with rubles and statistics
     balance_text = (
