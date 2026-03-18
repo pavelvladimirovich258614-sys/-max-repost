@@ -36,6 +36,39 @@ class UserRepository(BaseRepository[User]):
         result = await self._session.execute(stmt)
         return result.scalars().first()
 
+    async def get_email(self, telegram_id: int) -> str | None:
+        """
+        Get user email by Telegram ID.
+        
+        Args:
+            telegram_id: Telegram user ID
+            
+        Returns:
+            User email or None
+        """
+        user = await self.get_by_telegram_id(telegram_id)
+        return user.email if user else None
+
+    async def set_email(self, telegram_id: int, email: str) -> User | None:
+        """
+        Set user email.
+        
+        Args:
+            telegram_id: Telegram user ID
+            email: Email to set
+            
+        Returns:
+            Updated user instance or None
+        """
+        stmt = (
+            update(User)
+            .where(User.telegram_id == telegram_id)
+            .values(email=email)
+            .returning(User)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalars().first()
+
     async def get_or_create(self, telegram_id: int) -> tuple[User, bool]:
         """
         Get existing user or create new one.
@@ -172,6 +205,39 @@ class UserRepository(BaseRepository[User]):
             update(User)
             .where(User.id == user_id)
             .values(free_posts_used=func.least(User.free_posts_used + count, User.FREE_POSTS_LIMIT))
+            .returning(User)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalars().first()
+
+    async def get_email(self, telegram_id: int) -> str | None:
+        """
+        Get user email by Telegram ID.
+        
+        Args:
+            telegram_id: Telegram user ID
+            
+        Returns:
+            User email or None
+        """
+        user = await self.get_by_telegram_id(telegram_id)
+        return user.email if user else None
+
+    async def set_email(self, telegram_id: int, email: str) -> User | None:
+        """
+        Set user email.
+        
+        Args:
+            telegram_id: Telegram user ID
+            email: Email to set
+            
+        Returns:
+            Updated user instance or None
+        """
+        stmt = (
+            update(User)
+            .where(User.telegram_id == telegram_id)
+            .values(email=email)
             .returning(User)
         )
         result = await self._session.execute(stmt)

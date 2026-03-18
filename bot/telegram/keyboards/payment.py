@@ -51,3 +51,24 @@ def back_to_balance_keyboard() -> InlineKeyboardMarkup:
     
     builder.adjust(1)
     return builder.as_markup()
+
+
+def email_confirm_keyboard(email: str) -> InlineKeyboardMarkup:
+    """Keyboard for confirming existing email."""
+    builder = InlineKeyboardBuilder()
+    
+    builder.button(text=f"✅ Продолжить с {email}", callback_data="email_confirm")
+    builder.button(text="✏️ Изменить email", callback_data="email_change")
+    builder.button(text="❌ Отмена", callback_data="email_cancel")
+    
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def email_input_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard for email input (cancel only)."""
+    builder = InlineKeyboardBuilder()
+    
+    builder.button(text="❌ Отмена", callback_data="email_cancel")
+    
+    return builder.as_markup()

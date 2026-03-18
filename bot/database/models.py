@@ -92,6 +92,7 @@ class User(Base, TimestampMixin):
     bonus_received: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     free_posts_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
 
     # Constants
     FREE_POSTS_LIMIT = 5  # Maximum free posts per user

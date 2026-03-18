@@ -11,11 +11,14 @@ from loguru import logger
 from bot.payments.yookassa_client import YooKassaClient
 from bot.database.repositories.yookassa_payment import YooKassaPaymentRepository
 from bot.database.repositories.balance import UserBalanceRepository, BalanceTransactionRepository
+from bot.database.repositories.user import UserRepository
 from bot.telegram.keyboards.payment import (
     payment_amount_keyboard,
     payment_confirmation_keyboard,
     payment_history_keyboard,
     back_to_balance_keyboard,
+    email_confirm_keyboard,
+    email_input_keyboard,
 )
 
 payment_router = Router(name="payment")
@@ -25,8 +28,9 @@ yookassa_client = YooKassaClient()
 
 
 class PaymentStates(StatesGroup):
-    """FSM states for custom amount input."""
+    """FSM states for payment flow."""
     waiting_for_amount = State()
+    waiting_email = State()  # NEW: for email input
 
 
 # =============================================================================
@@ -58,7 +62,8 @@ async def callback_deposit(callback: CallbackQuery) -> None:
 @payment_router.callback_query(lambda c: c.data.startswith("pay_amount:"))
 async def callback_pay_amount(
     callback: CallbackQuery,
-    yookassa_payment_repo: YooKassaPaymentRepository,
+    state: FSMContext,
+    user_repo: UserRepository,
 ) -> None:
     """Handle fixed amount payment selection."""
     await callback.answer()
@@ -69,42 +74,32 @@ async def callback_pay_amount(
     
     user_id = callback.from_user.id
     
-    # Email not available from Telegram API, use default from settings
-    user_email = None
+    # Save amount to FSM
+    await state.update_data(amount=amount)
     
-    # Create payment in YooKassa
-    payment_id, confirmation_url = await yookassa_client.create_payment(
-        user_id=user_id,
-        amount_rub=amount,
-        description=f"Пополнение баланса на {amount}₽",
-        email=user_email,
-    )
+    # Check if user has email
+    email = await user_repo.get_email(user_id)
     
-    if not payment_id or not confirmation_url:
+    if email:
+        # Show confirmation keyboard with existing email
         await callback.message.edit_text(
-            "❌ <b>Ошибка создания платежа</b>\n\n"
-            "Не удалось создать платёж. Попробуйте позже.",
+            f"<b>📧 Email для чека</b>\n\n"
+            f"Для отправки чека по 54-ФЗ используем email:\n"
+            f"<code>{email}</code>\n\n"
+            f"Хотите продолжить с этим email?",
             parse_mode="HTML",
-            reply_markup=back_to_balance_keyboard(),
+            reply_markup=email_confirm_keyboard(email),
         )
-        return
-    
-    # Save to database
-    await yookassa_payment_repo.create_payment(
-        user_id=user_id,
-        payment_id=payment_id,
-        amount=amount,
-    )
-    
-    # Show payment instructions
-    await callback.message.edit_text(
-        f"<b>💳 Оплата {amount}₽</b>\n\n"
-        f"Нажмите кнопку «Оплатить» ниже для перехода к оплате.\n\n"
-        f"После оплаты вернитесь в бот и нажмите «Проверить оплату».\n\n"
-        f"<i>Платёж действителен 24 часа</i>",
-        parse_mode="HTML",
-        reply_markup=payment_confirmation_keyboard(payment_id, confirmation_url),
-    )
+    else:
+        # Ask for email input
+        await callback.message.edit_text(
+            "<b>📧 Введите email для чека</b>\n\n"
+            "По закону 54-ФЗ нам нужен ваш email для отправки чека.\n"
+            "Введите ваш email адрес:",
+            parse_mode="HTML",
+            reply_markup=email_input_keyboard(),
+        )
+        await state.set_state(PaymentStates.waiting_email)
 
 
 # =============================================================================
@@ -132,7 +127,7 @@ async def callback_pay_custom(callback: CallbackQuery, state: FSMContext) -> Non
 async def process_custom_amount(
     message: Message,
     state: FSMContext,
-    yookassa_payment_repo: YooKassaPaymentRepository,
+    user_repo: UserRepository,
 ) -> None:
     """Process custom amount input."""
     # Validate input
@@ -159,24 +154,89 @@ async def process_custom_amount(
         )
         return
     
-    # Clear state
-    await state.clear()
-    
     user_id = message.from_user.id
     
-    # Email not available from Telegram API, use default from settings
-    user_email = None
+    # Save amount to FSM
+    await state.update_data(amount=amount)
     
-    # Create payment in YooKassa
+    # Check if user has email
+    email = await user_repo.get_email(user_id)
+    
+    if email:
+        # Show confirmation keyboard with existing email
+        await message.answer(
+            f"<b>📧 Email для чека</b>\n\n"
+            f"Для отправки чека по 54-ФЗ используем email:\n"
+            f"<code>{email}</code>\n\n"
+            f"Хотите продолжить с этим email?",
+            parse_mode="HTML",
+            reply_markup=email_confirm_keyboard(email),
+        )
+    else:
+        # Ask for email input
+        await message.answer(
+            "<b>📧 Введите email для чека</b>\n\n"
+            "По закону 54-ФЗ нам нужен ваш email для отправки чека.\n"
+            "Введите ваш email адрес:",
+            parse_mode="HTML",
+            reply_markup=email_input_keyboard(),
+        )
+        await state.set_state(PaymentStates.waiting_email)
+
+
+@payment_router.message(PaymentStates.waiting_email)
+async def process_email_input(
+    message: Message,
+    state: FSMContext,
+    user_repo: UserRepository,
+    yookassa_payment_repo: YooKassaPaymentRepository,
+) -> None:
+    """Process email input."""
+    email = message.text.strip()
+    
+    # Validate email with regex
+    import re
+    if not re.match(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$', email):
+        await message.answer("❌ Некорректный email. Попробуйте ещё раз.")
+        return
+    
+    user_id = message.from_user.id
+    await user_repo.set_email(user_id, email)
+    
+    # Get amount from FSM
+    data = await state.get_data()
+    amount = data.get("amount")
+    
+    await state.clear()
+    
+    # Proceed to payment creation
+    await create_payment_and_show(message, user_id, amount, email, yookassa_payment_repo)
+
+
+async def create_payment_and_show(
+    message_or_callback: Message | CallbackQuery,
+    user_id: int,
+    amount: Decimal,
+    email: str,
+    yookassa_payment_repo: YooKassaPaymentRepository,
+) -> None:
+    """Create payment and show confirmation."""
+    # Determine the reply function based on message type
+    if isinstance(message_or_callback, Message):
+        reply_func = message_or_callback.answer
+    else:
+        reply_func = lambda text, **kwargs: message_or_callback.message.edit_text(text, **kwargs)
+    
+    # Create payment in YooKassa with email
     payment_id, confirmation_url = await yookassa_client.create_payment(
         user_id=user_id,
         amount_rub=amount,
         description=f"Пополнение баланса на {amount}₽",
-        email=user_email,
+        email=email,
     )
     
     if not payment_id or not confirmation_url:
-        await message.answer(
+        await reply_func(
             "❌ <b>Ошибка создания платежа</b>\n\n"
             "Не удалось создать платёж. Попробуйте позже.",
             parse_mode="HTML",
@@ -192,13 +252,90 @@ async def process_custom_amount(
     )
     
     # Show payment instructions
-    await message.answer(
+    await reply_func(
         f"<b>💳 Оплата {amount}₽</b>\n\n"
+        f"Email для чека: <code>{email}</code>\n\n"
         f"Нажмите кнопку «Оплатить» ниже для перехода к оплате.\n\n"
         f"После оплаты вернитесь в бот и нажмите «Проверить оплату».\n\n"
         f"<i>Платёж действителен 24 часа</i>",
         parse_mode="HTML",
         reply_markup=payment_confirmation_keyboard(payment_id, confirmation_url),
+    )
+
+
+# =============================================================================
+# Email Confirmation Callbacks
+# =============================================================================
+
+@payment_router.callback_query(lambda c: c.data == "email_confirm")
+async def callback_email_confirm(
+    callback: CallbackQuery,
+    state: FSMContext,
+    user_repo: UserRepository,
+    yookassa_payment_repo: YooKassaPaymentRepository,
+) -> None:
+    """Handle email confirmation - proceed with saved email."""
+    await callback.answer()
+    
+    user_id = callback.from_user.id
+    email = await user_repo.get_email(user_id)
+    
+    if not email:
+        await callback.message.edit_text(
+            "❌ Email не найден. Пожалуйста, введите email.",
+            reply_markup=email_input_keyboard(),
+        )
+        await state.set_state(PaymentStates.waiting_email)
+        return
+    
+    # Get amount from FSM
+    data = await state.get_data()
+    amount = data.get("amount")
+    
+    if not amount:
+        await callback.message.edit_text(
+            "❌ Ошибка: сумма не найдена. Начните заново.",
+            reply_markup=back_to_balance_keyboard(),
+        )
+        await state.clear()
+        return
+    
+    await state.clear()
+    
+    # Proceed to payment creation
+    await create_payment_and_show(callback, user_id, amount, email, yookassa_payment_repo)
+
+
+@payment_router.callback_query(lambda c: c.data == "email_change")
+async def callback_email_change(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """Handle email change - ask for new email."""
+    await callback.answer()
+    
+    await callback.message.edit_text(
+        "<b>📧 Введите новый email</b>\n\n"
+        "Введите новый email адрес для отправки чека:",
+        parse_mode="HTML",
+        reply_markup=email_input_keyboard(),
+    )
+    await state.set_state(PaymentStates.waiting_email)
+
+
+@payment_router.callback_query(lambda c: c.data == "email_cancel")
+async def callback_email_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """Handle email cancellation - abort payment flow."""
+    await callback.answer()
+    
+    await state.clear()
+    
+    await callback.message.edit_text(
+        "❌ Оплата отменена.",
+        reply_markup=back_to_balance_keyboard(),
     )
 
 

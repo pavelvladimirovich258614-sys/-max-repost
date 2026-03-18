@@ -81,7 +81,7 @@ class YooKassaClient:
             payment_id = payment.id
             confirmation_url = payment.confirmation.confirmation_url
             
-            logger.info(f"Created payment {payment_id} for user {user_id}, amount {amount_rub}₽")
+            logger.info(f"Created payment {payment_id} for user {user_id}, amount {amount_rub}₽, email: {customer_email}")
             return payment_id, confirmation_url
             
         except Exception as e:
