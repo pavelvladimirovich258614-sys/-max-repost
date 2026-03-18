@@ -45,23 +45,35 @@ async def _run_column_migrations() -> None:
     from sqlalchemy import text
     
     async with engine.begin() as conn:
-        # Check if free_posts_used column exists in users table
+        # Migration 1: Check if free_posts_used column exists in users table
         try:
-            # SQLite specific: check table info
             result = await conn.execute(
                 text("SELECT 1 FROM pragma_table_info('users') WHERE name='free_posts_used'")
             )
             column_exists = result.scalar() is not None
             
             if not column_exists:
-                # Add the column with default 0
                 await conn.execute(
                     text("ALTER TABLE users ADD COLUMN free_posts_used INTEGER NOT NULL DEFAULT 0")
                 )
                 logger.info("Migration: Added free_posts_used column to users table")
         except Exception as e:
-            # If anything fails, log it but don't stop the bot
-            logger.warning(f"Migration warning (non-critical): {e}")
+            logger.warning(f"Migration warning (free_posts_used): {e}")
+        
+        # Migration 2: Check if email column exists in users table
+        try:
+            result = await conn.execute(
+                text("SELECT 1 FROM pragma_table_info('users') WHERE name='email'")
+            )
+            column_exists = result.scalar() is not None
+            
+            if not column_exists:
+                await conn.execute(
+                    text("ALTER TABLE users ADD COLUMN email TEXT DEFAULT NULL")
+                )
+                logger.info("Migration: Added email column to users table")
+        except Exception as e:
+            logger.warning(f"Migration warning (email): {e}")
 
 
 async def main() -> None:
