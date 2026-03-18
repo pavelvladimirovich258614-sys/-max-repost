@@ -3,10 +3,17 @@
 import asyncio
 import logging
 
+from loguru import logger
+
 from bot.utils.logger import init_logger
 from bot.telegram.bot import init_bot
 from bot.database import Base, engine
 from bot.max_api.max_bot_handler import MaxBotListener
+from bot.max_api.client import MaxClient
+from bot.core.autopost import AutopostManager, set_autopost_manager
+from bot.core.telethon_client import TelethonChannelClient
+from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
+from bot.database.connection import get_session
 from config.settings import settings
 
 
@@ -71,6 +78,25 @@ async def main() -> None:
 
     # Initialize bot and dispatcher
     bot, dp = await init_bot()
+
+    # Initialize AutopostManager
+    telethon_client = TelethonChannelClient(
+        api_id=settings.tg_api_id,
+        api_hash=settings.tg_api_hash,
+        phone=settings.tg_phone,
+    )
+    max_client = MaxClient(settings.max_access_token)
+    autopost_manager = AutopostManager(telethon_client, max_client, bot)
+    set_autopost_manager(autopost_manager)
+    print("AutopostManager initialized")
+
+    # Load active autopost subscriptions
+    async with get_session() as session:
+        repo = AutopostSubscriptionRepository(session)
+        active_subs = await repo.get_active_subscriptions()
+        for sub in active_subs:
+            await autopost_manager.start_monitoring(sub)
+        logger.info(f"Autopost: loaded {len(active_subs)} active subscriptions")
 
     # Start Max bot listener (responds to messages in Max messenger)
     max_listener = MaxBotListener(settings.max_access_token)

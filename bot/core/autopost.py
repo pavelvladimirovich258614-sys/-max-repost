@@ -9,7 +9,7 @@ from loguru import logger
 from telethon import events
 from telethon.tl.types import Message
 
-from bot.core.transfer_engine import convert_entities_to_html, should_skip_message
+from bot.core.transfer_engine import convert_entities_to_html
 from bot.max_api.client import MaxClient
 from bot.database.balance import get_balance, charge_autopost_with_subscription
 from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
@@ -38,6 +38,23 @@ class AutopostManager:
         self.max_client = max_client
         self.bot = bot
         self.active_tasks: dict[str, dict] = {}  # tg_channel -> {max_chat_id, handler, user_id}
+    
+    def _should_skip_autopost(self, message: Message) -> tuple[bool, str]:
+        """Check if message should be skipped for autopost.
+        
+        Unlike bulk transfer, autopost forwards ALL messages including short ones.
+        Only skip service messages and empty messages.
+        """
+        # Skip service messages (channel actions, etc.)
+        if message.action:
+            return True, "service_message"
+        
+        # Skip empty messages (no text and no media)
+        if not message.raw_text and not message.photo and not message.video \
+           and not message.audio and not message.voice and not message.document:
+            return True, "empty_message"
+        
+        return False, ""
     
     async def start_autopost(
         self,
@@ -144,8 +161,11 @@ class AutopostManager:
             user_id: Telegram user ID
             tg_channel: Telegram channel username
         """
-        # 1. Filter junk messages (short replies, service messages)
-        should_skip, skip_reason = should_skip_message(message, post_index=message.id)
+        # Log new message received
+        logger.info(f"Autopost: new message in @{tg_channel}, id={message.id}")
+        
+        # 1. Filter service and empty messages
+        should_skip, skip_reason = self._should_skip_autopost(message)
         if should_skip:
             logger.info(f"Autopost: @{tg_channel} post #{message.id} skipped - {skip_reason}")
             return

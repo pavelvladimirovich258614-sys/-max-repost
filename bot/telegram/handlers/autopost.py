@@ -8,6 +8,7 @@ from loguru import logger
 
 from bot.telegram.keyboards.main import back_to_menu_keyboard
 from bot.database.models import MaxChannelBinding
+from bot.core.autopost import get_autopost_manager
 
 # Constants
 COST_PER_POST = 3  # 3 rubles per post
@@ -109,20 +110,35 @@ async def toggle_autopost_handler(
     callback: CallbackQuery,
     autopost_sub_repo,
 ) -> None:
-    """Toggle autopost subscription active status."""
+    """Toggle autopost subscription active status (pause/resume)."""
     await callback.answer()
     
     user_id = callback.from_user.id
     subscription_id = int(callback.data.split(":", 1)[1])
     
     try:
-        sub = await autopost_sub_repo.toggle_status(subscription_id, user_id)
+        # Get subscription before toggle
+        sub = await autopost_sub_repo.get_by_id_and_user(subscription_id, user_id)
+        if not sub:
+            await callback.answer("❌ Автопостинг не найден", show_alert=True)
+            return
         
-        if sub:
-            status_text = "возобновлён" if sub.is_active else "приостановлен"
-            await callback.answer(f"✅ Автопостинг {status_text}", show_alert=True)
+        manager = get_autopost_manager()
+        
+        if sub.is_active:
+            # Currently active -> pause
+            if manager:
+                await manager.stop_monitoring(subscription_id)
+            await autopost_sub_repo.pause_subscription(subscription_id, "manual_pause")
+            await callback.answer("⏸ Автопостинг приостановлен", show_alert=True)
         else:
-            await callback.answer("❌ Не удалось изменить статус", show_alert=True)
+            # Currently paused -> resume
+            await autopost_sub_repo.resume_subscription(subscription_id)
+            if manager:
+                # Reload subscription and start monitoring
+                sub = await autopost_sub_repo.get_by_id_and_user(subscription_id, user_id)
+                await manager.start_monitoring(sub)
+            await callback.answer("▶️ Автопостинг возобновлён", show_alert=True)
         
         # Refresh the list
         callback.data = "menu_manage_autopost"
@@ -190,6 +206,12 @@ async def delete_autopost_handler(
     subscription_id = int(callback.data.split(":", 1)[1])
     
     try:
+        # Stop monitoring first
+        manager = get_autopost_manager()
+        if manager:
+            await manager.stop_monitoring(subscription_id)
+        
+        # Then delete from DB
         success = await autopost_sub_repo.delete_by_user(subscription_id, user_id)
         
         if success:
