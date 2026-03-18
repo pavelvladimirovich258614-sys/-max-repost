@@ -13,6 +13,9 @@ from bot.database.models import (
     MaxChannelBinding,
     VerifiedChannel,
     TransferredPost,
+    UserBalance,
+    BalanceTransaction,
+    AutopostSubscription,
     PostStatus,
     PaymentStatus,
 )
@@ -32,6 +35,9 @@ __all__ = [
     "MaxChannelBinding",
     "VerifiedChannel",
     "TransferredPost",
+    "UserBalance",
+    "BalanceTransaction",
+    "AutopostSubscription",
     "PostStatus",
     "PaymentStatus",
 ]

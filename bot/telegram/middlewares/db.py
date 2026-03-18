@@ -17,6 +17,8 @@ from bot.database.repositories import (
     LogRepository,
     VerifiedChannelRepository,
 )
+from bot.database.repositories.balance import UserBalanceRepository
+from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
 
 
 class DBMiddleware(BaseMiddleware):
@@ -58,5 +60,7 @@ class DBMiddleware(BaseMiddleware):
             data["promo_activation_repo"] = PromoActivationRepository(session)
             data["log_repo"] = LogRepository(session)
             data["verified_channel_repo"] = VerifiedChannelRepository(session)
+            data["balance_repo"] = UserBalanceRepository(session)
+            data["autopost_sub_repo"] = AutopostSubscriptionRepository(session)
 
             return await handler(event, data)

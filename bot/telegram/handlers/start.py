@@ -11,7 +11,9 @@ from bot.telegram.keyboards.main import (
     start_keyboard,
     menu_keyboard,
     back_to_menu_keyboard,
+    balance_keyboard,
 )
+from bot.database.repositories.balance import UserBalanceRepository
 
 # Create router
 start_router = Router(name="start")
@@ -202,32 +204,34 @@ async def cmd_help(message: Message) -> None:
 
 
 @start_router.callback_query(lambda c: c.data == "menu_balance")
-async def callback_balance(callback: CallbackQuery, user_repo) -> None:
-    """Handle 'Check balance' button - show detailed balance info."""
+async def callback_balance(
+    callback: CallbackQuery,
+    balance_repo: UserBalanceRepository,
+) -> None:
+    """
+    Handle 'Check balance' button - show detailed balance info.
+    
+    Shows balance in rubles with statistics.
+    """
     # Answer callback FIRST before any async operations
     await callback.answer("⏳")
     
-    user = await user_repo.get_by_telegram_id(callback.from_user.id)
+    user_id = callback.from_user.id
     
-    # Get user's first name
-    first_name = callback.from_user.first_name or "друг"
+    # Get user balance from UserBalanceRepository
+    user_balance = await balance_repo.get_or_create(user_id)
     
-    # Calculate free remaining
-    free_remaining = max(0, 5 - user.free_posts_used)
-    
-    # Build balance text
+    # Build balance text with rubles and statistics
     balance_text = (
-        f"<b>💎 Ваш баланс</b>\n\n"
-        f"👤 {first_name}\n\n"
-        f"🎁 Бесплатных постов: {free_remaining} из 5\n"
-        f"💰 Оплаченных постов: {user.balance}\n\n"
-        f"💳 Стоимость переноса: 3₽ за пост"
+        f"<b>💰 Ваш баланс: {int(user_balance.balance)}₽</b>\n\n"
+        f"Пополнено: {int(user_balance.total_deposited)}₽\n"
+        f"Потрачено: {int(user_balance.total_spent)}₽"
     )
 
     await callback.message.edit_text(
         balance_text,
         parse_mode="HTML",
-        reply_markup=back_to_menu_keyboard(),
+        reply_markup=balance_keyboard(),
     )
 
 

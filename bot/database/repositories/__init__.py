@@ -10,6 +10,11 @@ from bot.database.repositories.log import LogRepository
 from bot.database.repositories.max_channel_binding import MaxChannelBindingRepository
 from bot.database.repositories.verified_channel import VerifiedChannelRepository
 from bot.database.repositories.transferred_post import TransferredPostRepository
+from bot.database.repositories.balance import (
+    UserBalanceRepository,
+    BalanceTransactionRepository,
+)
+from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
 
 __all__ = [
     "BaseRepository",
@@ -23,4 +28,7 @@ __all__ = [
     "MaxChannelBindingRepository",
     "VerifiedChannelRepository",
     "TransferredPostRepository",
+    "UserBalanceRepository",
+    "BalanceTransactionRepository",
+    "AutopostSubscriptionRepository",
 ]

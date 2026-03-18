@@ -9,6 +9,10 @@ class AutopostStates(StatesGroup):
     waiting_tg_channel = State()  # Waiting for Telegram channel link
     waiting_tg_admin_check = State()  # Waiting for admin check confirmation
     waiting_max_channel = State()  # Waiting for Max channel link
+    creating_select_channel = State()  # Selecting TG channel for new autopost
+    creating_select_max = State()  # Selecting Max channel for new autopost
+    creating_confirm = State()  # Confirming new autopost creation
+    managing_subscription = State()  # Managing specific subscription
 
 
 class TransferStates(StatesGroup):

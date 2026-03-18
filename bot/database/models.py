@@ -1,6 +1,7 @@
 """Database models using SQLAlchemy ORM."""
 
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum as PyEnum
 
 from sqlalchemy import (
@@ -22,7 +23,7 @@ from sqlalchemy.orm import (
     mapped_column,
     relationship,
 )
-from sqlalchemy.types import ARRAY
+from sqlalchemy.types import ARRAY, DECIMAL
 
 
 class Base(DeclarativeBase):
@@ -517,6 +518,106 @@ class TransferredPost(Base):
         return f"<TransferredPost(tg={self.tg_channel}, msg_id={self.tg_message_id}, max={self.max_chat_id})>"
 
 
+class AutopostSubscription(Base):
+    """
+    Autopost subscription for TG -> Max channel pairs.
+    
+    Tracks active autoposting subscriptions with statistics.
+    
+    Attributes:
+        id: Primary key
+        user_id: Telegram user ID
+        tg_channel: Telegram channel username
+        tg_channel_id: Telegram channel numeric ID
+        max_chat_id: Max channel chat_id
+        max_channel_name: Optional Max channel name
+        is_active: Whether autoposting is currently active
+        posts_transferred: Total number of posts transferred
+        created_at: When subscription was created
+        updated_at: Last update timestamp
+        last_post_at: When last post was transferred
+        paused_reason: Reason for pausing (e.g., 'insufficient_funds')
+    """
+    
+    __tablename__ = "autopost_subscriptions"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        index=True,
+    )
+    tg_channel: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        index=True,
+    )
+    tg_channel_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    max_chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    max_channel_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        nullable=False,
+    )
+    posts_transferred: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    last_post_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    paused_reason: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+    # Balance-related fields
+    cost_per_post: Mapped[Decimal] = mapped_column(
+        DECIMAL(10, 2),
+        default=Decimal("3.00"),
+        nullable=False,
+    )
+    total_spent: Mapped[Decimal] = mapped_column(
+        DECIMAL(10, 2),
+        default=Decimal("0.00"),
+        nullable=False,
+    )
+    last_post_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    
+    # Unique constraint: one subscription per user per TG channel per Max channel
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "tg_channel", "max_chat_id",
+            name="uq_autopost_user_tg_max"
+        ),
+        Index("ix_autopost_user_lookup", "user_id", "created_at"),
+        Index("ix_autopost_active", "user_id", "is_active"),
+    )
+    
+    def __repr__(self) -> str:
+        return (
+            f"<AutopostSubscription(user_id={self.user_id}, "
+            f"tg={self.tg_channel}, max={self.max_chat_id}, "
+            f"active={self.is_active})>"
+        )
+
+
 class Log(Base):
     """
     Audit log for user actions.
@@ -558,3 +659,96 @@ class Log(Base):
 
     def __repr__(self) -> str:
         return f"<Log(id={self.id}, action={self.action}, user_id={self.user_id})>"
+
+
+class UserBalance(Base, TimestampMixin):
+    """
+    User balance model for tracking ruble balance.
+    
+    Attributes:
+        id: Primary key
+        user_id: Telegram user ID (not internal user ID)
+        balance: Current balance in rubles
+        total_deposited: Total amount deposited
+        total_spent: Total amount spent
+        created_at: When balance record was created
+        updated_at: When balance record was last updated
+    """
+    
+    __tablename__ = "user_balances"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+    balance: Mapped[Decimal] = mapped_column(
+        DECIMAL(10, 2),
+        default=Decimal("0.00"),
+        nullable=False,
+    )
+    total_deposited: Mapped[Decimal] = mapped_column(
+        DECIMAL(10, 2),
+        default=Decimal("0.00"),
+        nullable=False,
+    )
+    total_spent: Mapped[Decimal] = mapped_column(
+        DECIMAL(10, 2),
+        default=Decimal("0.00"),
+        nullable=False,
+    )
+    
+    def __repr__(self) -> str:
+        return f"<UserBalance(user_id={self.user_id}, balance={self.balance})>"
+
+
+class BalanceTransaction(Base):
+    """
+    Balance transaction history model.
+    
+    Attributes:
+        id: Primary key
+        user_id: Telegram user ID
+        amount: Transaction amount (positive for deposit, negative for charge)
+        transaction_type: Type of transaction (deposit, autopost_charge, admin_topup, refund)
+        description: Human-readable description of the transaction
+        created_at: When transaction was created
+    """
+    
+    __tablename__ = "balance_transactions"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        index=True,
+        nullable=False,
+    )
+    amount: Mapped[Decimal] = mapped_column(
+        DECIMAL(10, 2),
+        nullable=False,
+    )
+    transaction_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        index=True,
+    )
+    description: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+    
+    # Indexes
+    __table_args__ = (
+        Index("ix_balance_transactions_user_created", "user_id", "created_at"),
+    )
+    
+    def __repr__(self) -> str:
+        return f"<BalanceTransaction(user_id={self.user_id}, amount={self.amount}, type={self.transaction_type})>"
