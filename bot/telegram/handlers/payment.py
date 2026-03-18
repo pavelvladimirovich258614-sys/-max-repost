@@ -58,7 +58,7 @@ async def callback_deposit(callback: CallbackQuery) -> None:
 @payment_router.callback_query(lambda c: c.data.startswith("pay_amount:"))
 async def callback_pay_amount(
     callback: CallbackQuery,
-    payment_repo: YooKassaPaymentRepository,
+    yookassa_payment_repo: YooKassaPaymentRepository,
 ) -> None:
     """Handle fixed amount payment selection."""
     await callback.answer()
@@ -90,7 +90,7 @@ async def callback_pay_amount(
         return
     
     # Save to database
-    await payment_repo.create_payment(
+    await yookassa_payment_repo.create_payment(
         user_id=user_id,
         payment_id=payment_id,
         amount=amount,
@@ -132,7 +132,7 @@ async def callback_pay_custom(callback: CallbackQuery, state: FSMContext) -> Non
 async def process_custom_amount(
     message: Message,
     state: FSMContext,
-    payment_repo: YooKassaPaymentRepository,
+    yookassa_payment_repo: YooKassaPaymentRepository,
 ) -> None:
     """Process custom amount input."""
     # Validate input
@@ -185,7 +185,7 @@ async def process_custom_amount(
         return
     
     # Save to database
-    await payment_repo.create_payment(
+    await yookassa_payment_repo.create_payment(
         user_id=user_id,
         payment_id=payment_id,
         amount=amount,
@@ -209,7 +209,7 @@ async def process_custom_amount(
 @payment_router.callback_query(lambda c: c.data.startswith("pay_check:"))
 async def callback_check_payment(
     callback: CallbackQuery,
-    payment_repo: YooKassaPaymentRepository,
+    yookassa_payment_repo: YooKassaPaymentRepository,
     balance_repo: UserBalanceRepository,
     transaction_repo: BalanceTransactionRepository,
 ) -> None:
@@ -219,7 +219,7 @@ async def callback_check_payment(
     payment_id = callback.data.split(":")[1]
     
     # Get payment from DB
-    payment = await payment_repo.get_by_payment_id(payment_id)
+    payment = await yookassa_payment_repo.get_by_payment_id(payment_id)
     if not payment:
         await callback.message.edit_text(
             "❌ Платёж не найден",
@@ -234,7 +234,7 @@ async def callback_check_payment(
         # Payment successful
         if payment.status != "succeeded":
             # Update payment status
-            await payment_repo.update_status(payment_id, "succeeded")
+            await yookassa_payment_repo.update_status(payment_id, "succeeded")
             
             # Add balance
             await balance_repo.update_balance(
@@ -291,7 +291,7 @@ async def callback_check_payment(
         )
         
     elif status == "canceled":
-        await payment_repo.update_status(payment_id, "canceled")
+        await yookassa_payment_repo.update_status(payment_id, "canceled")
         await callback.message.edit_text(
             "❌ <b>Платёж отменён</b>",
             parse_mode="HTML",
@@ -312,7 +312,7 @@ async def callback_check_payment(
 @payment_router.callback_query(lambda c: c.data.startswith("pay_cancel:"))
 async def callback_cancel_payment(
     callback: CallbackQuery,
-    payment_repo: YooKassaPaymentRepository,
+    yookassa_payment_repo: YooKassaPaymentRepository,
 ) -> None:
     """Cancel payment."""
     await callback.answer()
@@ -320,7 +320,7 @@ async def callback_cancel_payment(
     payment_id = callback.data.split(":")[1]
     
     # Update status in DB
-    await payment_repo.update_status(payment_id, "canceled")
+    await yookassa_payment_repo.update_status(payment_id, "canceled")
     
     await callback.message.edit_text(
         "❌ Платёж отменён.",
@@ -335,7 +335,7 @@ async def callback_cancel_payment(
 @payment_router.callback_query(lambda c: c.data == "balance_history")
 async def callback_payment_history(
     callback: CallbackQuery,
-    payment_repo: YooKassaPaymentRepository,
+    yookassa_payment_repo: YooKassaPaymentRepository,
 ) -> None:
     """Show payment history."""
     await callback.answer()
@@ -343,7 +343,7 @@ async def callback_payment_history(
     user_id = callback.from_user.id
     
     # Get last 10 payments
-    payments = await payment_repo.get_history(user_id, limit=10)
+    payments = await yookassa_payment_repo.get_history(user_id, limit=10)
     
     if not payments:
         await callback.message.edit_text(
