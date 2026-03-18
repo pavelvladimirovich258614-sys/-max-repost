@@ -81,9 +81,9 @@ async def main() -> None:
 
     # Initialize AutopostManager
     telethon_client = TelethonChannelClient(
-        api_id=settings.tg_api_id,
-        api_hash=settings.tg_api_hash,
-        phone=settings.tg_phone,
+        api_id=settings.telegram_api_id,
+        api_hash=settings.telegram_api_hash,
+        phone=settings.telegram_phone,
     )
     max_client = MaxClient(settings.max_access_token)
     autopost_manager = AutopostManager(telethon_client, max_client, bot)
