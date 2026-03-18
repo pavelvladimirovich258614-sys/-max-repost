@@ -8,7 +8,6 @@ from decimal import Decimal
 from typing import Callable
 
 from loguru import logger
-from telethon import events
 from telethon.tl.types import Message
 
 from bot.core.transfer_engine import convert_entities_to_html
@@ -37,9 +36,16 @@ class AutopostManager:
     """
     Manages autoposting for all active channels.
     
-    Uses Telethon event handlers to listen for new messages in TG channels
+    Uses polling to check for new messages in TG channels
     and automatically forwards them to Max channels.
+    Polling is more reliable than event handlers for channels
+    where the user is the author.
     """
+    
+    # Polling interval in seconds
+    POLL_INTERVAL = 10
+    # Error retry interval in seconds
+    ERROR_INTERVAL = 30
     
     def __init__(self, telethon_client, max_client: MaxClient, bot=None):
         """
@@ -53,7 +59,8 @@ class AutopostManager:
         self.telethon_client = telethon_client
         self.max_client = max_client
         self.bot = bot
-        self.active_tasks: dict[str, dict] = {}  # tg_channel -> {max_chat_id, handler, user_id}
+        # tg_channel -> {max_chat_id, task, user_id, subscription}
+        self.active_tasks: dict[str, dict] = {}
     
     def _should_skip_autopost(self, message: Message) -> tuple[bool, str]:
         """Check if message should be skipped for autopost.
@@ -104,7 +111,7 @@ class AutopostManager:
             client = await self.telethon_client._get_client()
             entity = await client.get_entity(tg_channel)
             
-            # Catch-up logic: process missed posts before setting up event handler
+            # Catch-up logic: process missed posts before starting polling
             try:
                 await self._catch_up_missed_posts(
                     client, entity, tg_channel, max_chat_id, user_id, subscription
@@ -113,39 +120,122 @@ class AutopostManager:
                 logger.error(f"Catch-up failed for {tg_channel}: {e}")
                 # Continue with monitoring even if catch-up fails
             
-            # Create event handler with closure for user_id and tg_channel
-            @client.on(events.NewMessage(chats=entity))
-            async def handler(event):
-                """Handle new messages in the channel."""
-                logger.info(f"Event received: {type(event).__name__} from channel_id={event.chat_id if hasattr(event, 'chat_id') else 'unknown'}")
-                try:
-                    await self._forward_post(
-                        event.message, 
-                        max_chat_id, 
-                        user_id, 
-                        tg_channel,
-                        subscription
-                    )
-                except Exception as e:
-                    logger.error(f"Autopost error for {tg_channel}: {e}", exc_info=True)
-            
-            logger.info(f"Registered NewMessage handler for channel: {tg_channel} (entity_id={entity.id})")
+            # Start polling task
+            task = asyncio.create_task(
+                self._monitor_channel_polling(
+                    tg_channel, max_chat_id, user_id, subscription
+                )
+            )
             
             # Store task info
             self.active_tasks[tg_channel] = {
                 "max_chat_id": max_chat_id,
                 "user_id": user_id,
-                "handler": handler,
-                "entity": entity,
+                "task": task,
                 "subscription": subscription,
             }
             
-            logger.info(f"Autopost started: {tg_channel} -> {max_chat_id}")
+            logger.info(f"Autopost polling started: {tg_channel} -> {max_chat_id}")
             return True
             
         except Exception as e:
             logger.error(f"Failed to start autopost for {tg_channel}: {e}")
             return False
+    
+    async def _monitor_channel_polling(
+        self,
+        tg_channel: str,
+        max_chat_id: int,
+        user_id: int,
+        subscription: object | None,
+    ) -> None:
+        """
+        Monitor channel for new posts via polling.
+        
+        Polls the channel every POLL_INTERVAL seconds to check for new messages.
+        More reliable than event handlers for channels where user is author.
+        
+        Args:
+            tg_channel: Telegram channel username (without @)
+            max_chat_id: Max channel chat_id
+            user_id: Telegram user ID who owns this autopost
+            subscription: Optional AutopostSubscription object
+        """
+        # Get initial last_post_id from subscription
+        last_post_id = getattr(subscription, 'last_post_id', None) or 0
+        subscription_id = getattr(subscription, 'id', None)
+        
+        logger.info(
+            f"Autopost polling task started: @{tg_channel}, "
+            f"last_post_id={last_post_id}, interval={self.POLL_INTERVAL}s"
+        )
+        
+        try:
+            while True:
+                try:
+                    client = await self.telethon_client._get_client()
+                    new_messages = []
+                    
+                    # Get messages newer than last_post_id
+                    # iter_messages with min_id returns messages with id > min_id
+                    async for msg in client.iter_messages(
+                        tg_channel,
+                        min_id=last_post_id,
+                        limit=50,
+                    ):
+                        if msg.id > last_post_id:
+                            new_messages.append(msg)
+                    
+                    if new_messages:
+                        # Sort by ID ascending (oldest first) to process in order
+                        new_messages.sort(key=lambda m: m.id)
+                        
+                        logger.info(
+                            f"Autopost: found {len(new_messages)} new message(s) in @{tg_channel}"
+                        )
+                        
+                        for msg in new_messages:
+                            logger.info(
+                                f"Autopost: processing post in @{tg_channel}, "
+                                f"id={msg.id}, text={msg.text[:50] if msg.text else '[media]'!r}"
+                            )
+                            
+                            # Forward the post
+                            success = await self._forward_post(
+                                msg, max_chat_id, user_id, tg_channel, subscription
+                            )
+                            
+                            # Update last_post_id on success
+                            if success:
+                                last_post_id = msg.id
+                                if subscription_id:
+                                    await self._update_last_post_id(subscription_id, last_post_id)
+                    
+                    # Wait before next poll
+                    await asyncio.sleep(self.POLL_INTERVAL)
+                    
+                except asyncio.CancelledError:
+                    logger.info(f"Autopost polling cancelled: @{tg_channel}")
+                    raise
+                except Exception as e:
+                    logger.error(
+                        f"Autopost polling error for @{tg_channel}: {e}",
+                        exc_info=True
+                    )
+                    # Wait longer on error before retry
+                    await asyncio.sleep(self.ERROR_INTERVAL)
+                    
+        except asyncio.CancelledError:
+            logger.info(f"Autopost polling stopped: @{tg_channel}")
+    
+    async def _update_last_post_id(self, subscription_id: int, post_id: int) -> None:
+        """Update last_post_id in database."""
+        try:
+            async with get_session() as session:
+                repo = AutopostSubscriptionRepository(session)
+                await repo.update_last_post_id(subscription_id, post_id)
+        except Exception as e:
+            logger.error(f"Failed to update last_post_id: {e}")
     
     async def _catch_up_missed_posts(
         self,
@@ -263,9 +353,15 @@ class AutopostManager:
             return False
         
         try:
-            task = self.active_tasks.pop(tg_channel)
-            client = await self.telethon_client._get_client()
-            client.remove_event_handler(task["handler"])
+            task_info = self.active_tasks.pop(tg_channel)
+            task = task_info.get("task")
+            
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
             
             logger.info(f"Autopost stopped: {tg_channel}")
             return True
@@ -281,7 +377,7 @@ class AutopostManager:
         user_id: int, 
         tg_channel: str,
         subscription: object | None = None,
-    ) -> None:
+    ) -> bool:
         """
         Forward a single post to Max with balance check.
         
@@ -291,6 +387,9 @@ class AutopostManager:
             user_id: Telegram user ID
             tg_channel: Telegram channel username
             subscription: Optional AutopostSubscription object to update last_post_id
+            
+        Returns:
+            True if forwarded successfully, False otherwise
         """
         # Log new message received
         logger.info(f"Autopost: new message in @{tg_channel}, id={message.id}")
@@ -299,7 +398,7 @@ class AutopostManager:
         should_skip, skip_reason = self._should_skip_autopost(message)
         if should_skip:
             logger.info(f"Autopost: @{tg_channel} post #{message.id} skipped - {skip_reason}")
-            return
+            return True  # Return True so we don't retry
         
         # 2. Check if user is admin (admins have unlimited access)
         is_admin = user_id in settings.ADMIN_IDS
@@ -318,21 +417,18 @@ class AutopostManager:
                     if error == "insufficient_funds":
                         await self._notify_insufficient_funds(user_id, tg_channel)
                         await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
-                    return
+                    return False
         
         # 4. Forward the post
-        await self._do_forward(message, max_chat_id)
+        try:
+            await self._do_forward(message, max_chat_id)
+        except Exception as e:
+            logger.error(f"Autopost: failed to forward post #{message.id}: {e}")
+            return False
         
-        # 5. Update last_post_id in database
-        if subscription:
-            subscription_id = getattr(subscription, 'id', None)
-            if subscription_id:
-                async with get_session() as session:
-                    repo = AutopostSubscriptionRepository(session)
-                    await repo.update_last_post_id(subscription_id, message.id)
-        
-        # 6. Log success
+        # 5. Log success
         logger.info(f"Autopost: @{tg_channel} post #{message.id} transferred")
+        return True
     
     async def _do_forward(self, message: Message, max_chat_id: int) -> None:
         """
