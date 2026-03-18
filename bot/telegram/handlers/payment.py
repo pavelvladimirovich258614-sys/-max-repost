@@ -69,11 +69,15 @@ async def callback_pay_amount(
     
     user_id = callback.from_user.id
     
+    # Email not available from Telegram API, use default from settings
+    user_email = None
+    
     # Create payment in YooKassa
     payment_id, confirmation_url = await yookassa_client.create_payment(
         user_id=user_id,
         amount_rub=amount,
         description=f"Пополнение баланса на {amount}₽",
+        email=user_email,
     )
     
     if not payment_id or not confirmation_url:
@@ -160,11 +164,15 @@ async def process_custom_amount(
     
     user_id = message.from_user.id
     
+    # Email not available from Telegram API, use default from settings
+    user_email = None
+    
     # Create payment in YooKassa
     payment_id, confirmation_url = await yookassa_client.create_payment(
         user_id=user_id,
         amount_rub=amount,
         description=f"Пополнение баланса на {amount}₽",
+        email=user_email,
     )
     
     if not payment_id or not confirmation_url:

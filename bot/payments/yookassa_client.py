@@ -23,19 +23,24 @@ class YooKassaClient:
         user_id: int,
         amount_rub: Decimal,
         description: str = "Пополнение баланса",
+        email: str | None = None,
     ) -> tuple[str | None, str | None]:
         """
-        Create a new payment.
+        Create a new payment with 54-FZ receipt.
         
         Args:
             user_id: Telegram user ID
             amount_rub: Amount in rubles
             description: Payment description
+            email: Customer email for receipt (optional, uses default if not provided)
             
         Returns:
             Tuple of (payment_id, confirmation_url) or (None, None) on error
         """
         try:
+            # Use provided email or default from settings
+            customer_email = email or settings.receipt_email
+            
             payment = Payment.create({
                 "amount": {
                     "value": str(amount_rub),
@@ -50,6 +55,25 @@ class YooKassaClient:
                 "metadata": {
                     "user_id": str(user_id),
                     "amount": str(amount_rub)
+                },
+                # 54-FZ receipt (required in production mode)
+                "receipt": {
+                    "customer": {
+                        "email": customer_email
+                    },
+                    "items": [
+                        {
+                            "description": "Пополнение баланса бота Max-Repost",
+                            "quantity": "1.00",
+                            "amount": {
+                                "value": str(amount_rub),
+                                "currency": "RUB"
+                            },
+                            "vat_code": 1,  # 1 = без НДС
+                            "payment_mode": "full_payment",
+                            "payment_subject": "service"
+                        }
+                    ]
                 }
             })
             
