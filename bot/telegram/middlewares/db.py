@@ -24,6 +24,7 @@ from bot.database.repositories.balance import (
 from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
 from bot.database.repositories.max_channel_binding import MaxChannelBindingRepository
 from bot.database.repositories.yookassa_payment import YooKassaPaymentRepository
+from bot.database.repositories.transferred_post import TransferredPostRepository
 
 
 class DBMiddleware(BaseMiddleware):
@@ -70,5 +71,6 @@ class DBMiddleware(BaseMiddleware):
             data["autopost_sub_repo"] = AutopostSubscriptionRepository(session)
             data["max_binding_repo"] = MaxChannelBindingRepository(session)
             data["yookassa_payment_repo"] = YooKassaPaymentRepository(session)
+            data["transferred_post_repo"] = TransferredPostRepository(session)
 
             return await handler(event, data)

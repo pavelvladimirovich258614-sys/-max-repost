@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import sqlite3
 import os
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -322,6 +323,12 @@ class AutopostManager:
                         logger.warning(f"Connection lost in polling for @{tg_channel}, will retry: {e}")
                         await asyncio.sleep(self.ERROR_INTERVAL)
                         continue  # Don't stop polling, continue to next iteration
+                    except sqlite3.OperationalError as e:
+                        if "database is locked" in str(e).lower():
+                            logger.warning(f"Database locked in polling for @{tg_channel}, waiting 5s...")
+                            await asyncio.sleep(5)
+                            continue
+                        raise
                     
                     if new_messages:
                         # Sort by ID ascending (oldest first) to process in order
@@ -382,7 +389,17 @@ class AutopostManager:
                     logger.warning(f"Connection lost in polling for @{tg_channel}, will retry: {e}")
                     await asyncio.sleep(self.ERROR_INTERVAL)
                     continue  # Don't stop polling, continue to next iteration
+                except sqlite3.OperationalError as e:
+                    if "database is locked" in str(e).lower():
+                        logger.warning(f"Database locked in polling for @{tg_channel}, waiting 5s...")
+                        await asyncio.sleep(5)
+                        continue
+                    raise
                 except Exception as e:
+                    if "database is locked" in str(e).lower():
+                        logger.warning(f"Database locked in polling for @{tg_channel}, waiting 5s...")
+                        await asyncio.sleep(5)
+                        continue
                     logger.error(
                         f"Autopost polling error for @{tg_channel}: {e}",
                         exc_info=True

@@ -8,6 +8,7 @@ Run scripts/auth_telethon.py once to authorize and create the session file.
 """
 
 import asyncio
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -143,6 +144,15 @@ class TelethonChannelClient:
             self._client = None
             logger.info("Telethon client disconnected")
 
+    def _is_database_locked_error(self, e: Exception) -> bool:
+        """Check if exception is a database locked error."""
+        error_msg = str(e).lower()
+        if "database is locked" in error_msg:
+            return True
+        if hasattr(e, 'args') and any("database is locked" in str(arg).lower() for arg in e.args):
+            return True
+        return False
+
     async def _call_with_retry(self, method, *args, **kwargs):
         """Call a Telethon method with retry logic for connection errors.
         
@@ -159,6 +169,12 @@ class TelethonChannelClient:
         for attempt in range(MAX_RETRIES):
             try:
                 return await method(*args, **kwargs)
+            except sqlite3.OperationalError as e:
+                if self._is_database_locked_error(e):
+                    logger.warning(f"Telethon database locked, retrying in 5s... (attempt {attempt+1})")
+                    await asyncio.sleep(5)
+                    continue
+                raise
             except (ConnectionError, asyncio.TimeoutError, OSError) as e:
                 logger.warning(f"Telethon connection lost, reconnecting... attempt {attempt+1}")
                 try:
@@ -176,6 +192,15 @@ class TelethonChannelClient:
                 if self._client and self._client.is_connected():
                     await self._client.get_me()
                     logger.debug("Keepalive ping sent")
+            except sqlite3.OperationalError as e:
+                if self._is_database_locked_error(e):
+                    logger.warning("Keepalive skipped due to database lock")
+                    continue
+                logger.warning(f"Keepalive failed: {e}")
+                try:
+                    await self._client.connect()
+                except Exception:
+                    pass
             except Exception as e:
                 logger.warning(f"Keepalive failed: {e}")
                 try:
