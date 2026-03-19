@@ -182,8 +182,10 @@ class AutopostManager:
         """
         Start autoposting for a channel.
         
+        Supports both public channels (by username) and private channels (by ID).
+        
         Args:
-            tg_channel: Telegram channel username (with or without @)
+            tg_channel: Telegram channel username (with or without @) or numeric ID
             max_chat_id: Max channel chat_id
             user_id: Telegram user ID who owns this autopost
             subscription: Optional AutopostSubscription object for catch-up logic
@@ -200,16 +202,33 @@ class AutopostManager:
             logger.info(f"Autopost already active for {tg_channel}")
             return True
         
+        # Get channel identifier for Telethon
+        # For private channels, use tg_channel_id if available
+        tg_channel_id = getattr(subscription, 'tg_channel_id', None)
+        channel_identifier = tg_channel_id if tg_channel_id else tg_channel
+        
         try:
             client = await self.telethon_client._get_client()
-            entity = await client.get_entity(tg_channel)
+            
+            # Try to get entity using channel_id (for private) or username (for public)
+            try:
+                if tg_channel_id and tg_channel_id.lstrip('-').isdigit():
+                    # Use numeric ID for private channels
+                    entity = await client.get_entity(int(tg_channel_id))
+                    logger.info(f"Using channel ID {tg_channel_id} for private channel access")
+                else:
+                    # Use username for public channels
+                    entity = await client.get_entity(tg_channel)
+            except Exception as e:
+                logger.warning(f"Failed to get entity with ID, trying username: {e}")
+                entity = await client.get_entity(tg_channel)
             
             # Catch-up logic: process missed posts before starting polling
             # Returns the updated last_post_id after catch-up
             initial_last_post_id = None
             try:
                 initial_last_post_id = await self._catch_up_missed_posts(
-                    client, entity, tg_channel, max_chat_id, user_id, subscription
+                    client, entity, channel_identifier, max_chat_id, user_id, subscription
                 )
             except Exception as e:
                 logger.error(f"Catch-up failed for {tg_channel}: {e}")
@@ -219,7 +238,7 @@ class AutopostManager:
             # This prevents duplicate processing of posts handled during catch-up
             task = asyncio.create_task(
                 self._monitor_channel_polling(
-                    tg_channel, max_chat_id, user_id, subscription, initial_last_post_id
+                    channel_identifier, max_chat_id, user_id, subscription, initial_last_post_id
                 )
             )
             
@@ -240,7 +259,7 @@ class AutopostManager:
     
     async def _monitor_channel_polling(
         self,
-        tg_channel: str,
+        channel_identifier: str,
         max_chat_id: int,
         user_id: int,
         subscription: object | None,
@@ -253,13 +272,15 @@ class AutopostManager:
         More reliable than event handlers for channels where user is author.
         
         Args:
-            tg_channel: Telegram channel username (without @)
+            channel_identifier: Telegram channel identifier (username or numeric ID)
             max_chat_id: Max channel chat_id
             user_id: Telegram user ID who owns this autopost
             subscription: Optional AutopostSubscription object
             initial_last_post_id: Optional initial last_post_id from catch-up
                                   (prevents duplicate processing on startup)
         """
+        # Get tg_channel for display/logging purposes
+        tg_channel = getattr(subscription, 'tg_channel', channel_identifier)
         # Get initial last_post_id from catch-up result or subscription
         # initial_last_post_id is preferred as it's updated after catch-up processing
         if initial_last_post_id is not None:
@@ -286,9 +307,10 @@ class AutopostManager:
                     
                     # Get messages newer than last_post_id
                     # iter_messages with min_id returns messages with id > min_id
+                    # Use channel_identifier (may be numeric ID for private channels)
                     try:
                         async for msg in client.iter_messages(
-                            tg_channel,
+                            channel_identifier,
                             min_id=last_post_id,
                             limit=50,
                         ):
@@ -753,7 +775,7 @@ class AutopostManager:
         self,
         client,
         entity,
-        tg_channel: str,
+        channel_identifier: str,
         max_chat_id: int,
         user_id: int,
         subscription: object | None,
@@ -764,7 +786,7 @@ class AutopostManager:
         Args:
             client: Telethon client
             entity: Telegram channel entity
-            tg_channel: Telegram channel username (without @)
+            channel_identifier: Telegram channel identifier (username or numeric ID)
             max_chat_id: Max channel chat_id
             user_id: Telegram user ID
             subscription: AutopostSubscription object with last_post_id
@@ -773,8 +795,11 @@ class AutopostManager:
             The last processed post_id (for passing to polling task to prevent duplicates),
             or None if no subscription/no posts processed
         """
+        # Get tg_channel for display/logging from subscription
+        tg_channel = getattr(subscription, 'tg_channel', channel_identifier) if subscription else channel_identifier
+        
         if subscription is None:
-            logger.debug(f"No subscription provided for {tg_channel}, skipping catch-up")
+            logger.debug(f"No subscription provided for {channel_identifier}, skipping catch-up")
             return None
         
         subscription_id = getattr(subscription, 'id', None)

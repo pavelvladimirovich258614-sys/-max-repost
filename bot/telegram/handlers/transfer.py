@@ -451,6 +451,7 @@ async def select_verified_channel(
     Select a verified channel and proceed to Max channel selection.
     
     Skips TG channel input and verification since channel is already verified.
+    Works with both public and private channels.
     
     Args:
         callback: Callback query
@@ -462,21 +463,60 @@ async def select_verified_channel(
     # Answer callback FIRST before any async operations
     await callback.answer()
     
-    # Extract channel username from callback data
+    # Extract channel identifier from callback data
     tg_channel = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
     
     try:
-        # Get channel info from Telegram
-        chat = await bot.get_chat(f"@{tg_channel}")
+        # Get verified channel record to get tg_channel_id (for private channels)
+        verified_channel = await verified_channel_repo.get_verified_channel(user_id, tg_channel)
+        tg_channel_id = verified_channel.tg_channel_id if verified_channel else None
+        
+        # Try to get channel info using Telethon (supports both public and private)
+        chat_title = None
+        chat_id = None
+        
+        try:
+            telethon = get_telethon_client(
+                api_id=settings.telegram_api_id,
+                api_hash=settings.telegram_api_hash,
+                phone=settings.telegram_phone,
+            )
+            client = await telethon._get_client()
+            
+            # Try by channel_id first (for private channels), then by username
+            if tg_channel_id:
+                try:
+                    entity = await client.get_entity(int(tg_channel_id))
+                    chat_title = entity.title
+                    chat_id = tg_channel_id
+                except Exception:
+                    pass
+            
+            # Fallback to username/public identifier
+            if not chat_title:
+                entity = await client.get_entity(tg_channel)
+                chat_title = entity.title
+                chat_id = str(entity.id)
+                
+        except Exception as e:
+            logger.warning(f"Telethon failed to get channel info, trying Bot API: {e}")
+            # Fallback to Bot API (only works for public channels)
+            try:
+                chat = await bot.get_chat(f"@{tg_channel}")
+                chat_title = chat.title
+                chat_id = str(chat.id)
+            except Exception as e2:
+                logger.error(f"Both Telethon and Bot API failed: {e2}")
+                raise
         
         # Store in state
         await state.update_data(
             user_id=user_id,
             chat_id=callback.message.chat.id,
             bot_message_id=callback.message.message_id,
-            transfer_tg_channel_id=str(chat.id),
-            transfer_tg_channel_title=chat.title,
+            transfer_tg_channel_id=chat_id,
+            transfer_tg_channel_title=chat_title,
             transfer_tg_channel_username=tg_channel,
         )
         
@@ -485,15 +525,15 @@ async def select_verified_channel(
         if not is_verified:
             # Should not happen, but handle gracefully
             await callback.answer("⚠️ Требуется повторная верификация", show_alert=True)
-            await _show_verification_code(callback.message, state, chat.title, db_session, verified_channel_repo)
+            await _show_verification_code(callback.message, state, chat_title, db_session, verified_channel_repo)
             return
         
         # Proceed directly to Max channel selection (skip verification)
-        await _show_max_connection_instructions(callback.message, state, chat.title, db_session, user_repo=None)
+        await _show_max_connection_instructions(callback.message, state, chat_title, db_session, user_repo=None)
         
     except Exception as e:
         logger.error(f"Error selecting verified channel {tg_channel}: {e}")
-        await callback.answer("❌ Ошибка выбора канала", show_alert=True)
+        await callback.answer("❌ Ошибка выбора канала. Убедитесь что вы всё ещё подписаны.", show_alert=True)
 
 
 @transfer_router.message(StateFilter(TransferStates.transfer_waiting_tg_channel))
@@ -1865,10 +1905,11 @@ async def _continue_after_max_channel_set(
         builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
         await _edit_or_send_message(
             target_message,
-            text="❌ Не удалось подсчитать посты в канале.\n\n"
+            text="❌ Не удалось получить доступ к каналу.\n\n"
             "Убедитесь, что:\n"
-            "• Канал публичный\n"
-            "• Бот добавлен в администраторы канала",
+            "• Вы подписаны на канал (особенно для приватных)\n"
+            "• Бот @maxx_repost_bot добавлен в администраторы канала\n"
+            "• Канал доступен для чтения",
             state=state,
             reply_markup=builder.as_markup(),
         )

@@ -5,8 +5,10 @@ from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.pool import NullPool
+from sqlalchemy import event
 
 from config.settings import settings
+
 
 # Async engine with SQLite locking fixes
 # - connect_args={"timeout": 30}: wait up to 30s for lock instead of failing immediately
@@ -19,6 +21,20 @@ engine = create_async_engine(
     poolclass=NullPool,
     pool_pre_ping=True,
 )
+
+
+# WAL mode setup for SQLite to handle concurrent access
+# WAL allows concurrent reads while writing, reducing "database is locked" errors
+@event.listens_for(engine.sync_engine, "connect")
+def set_sqlite_pragma(dbapi_conn, connection_record):
+    """Enable WAL mode for SQLite on connection."""
+    if settings.database_url.startswith("sqlite"):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA cache_size=-64000")  # 64MB cache
+        cursor.close()
+
 
 # Session factory
 async_session_maker = async_sessionmaker(

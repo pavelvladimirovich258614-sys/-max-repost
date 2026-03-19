@@ -188,7 +188,7 @@ class TelethonChannelClient:
         Get channel description (about) via Telethon.
 
         Args:
-            channel: Channel username (with or without @) or channel ID
+            channel: Channel username (with or without @), channel ID, or invite hash
 
         Returns:
             Channel description string or empty string if not available
@@ -198,10 +198,6 @@ class TelethonChannelClient:
         """
         client = await self._get_client()
 
-        # Normalize channel identifier
-        if channel.startswith('@'):
-            channel = channel[1:]
-
         try:
             entity = await self._call_with_retry(client.get_entity, channel)
             full = await self._call_with_retry(client, GetFullChannelRequest(entity))
@@ -210,12 +206,16 @@ class TelethonChannelClient:
             logger.error(f"Error getting channel description for {channel}: {e}")
             raise
 
-    async def count_channel_posts(self, channel_username: str) -> int:
+    async def count_channel_posts(self, channel_identifier: str) -> int:
         """
         Count total posts in a Telegram channel.
 
+        Supports public channels (@username), private channels (by ID or invite),
+        and numeric channel IDs (-100...).
+
         Args:
-            channel_username: Channel username (with or without @)
+            channel_identifier: Channel username (with or without @), numeric ID,
+                               or invite hash (+XXXXX)
 
         Returns:
             Total number of posts in the channel
@@ -225,33 +225,33 @@ class TelethonChannelClient:
         """
         client = await self._get_client()
 
-        # Normalize username
-        if channel_username.startswith('@'):
-            channel_username = channel_username[1:]
-
         try:
             # get_messages with limit=0 returns only total count
             # This is efficient - doesn't fetch actual messages
-            result = await self._call_with_retry(client.get_messages, channel_username, limit=0)
+            result = await self._call_with_retry(client.get_messages, channel_identifier, limit=0)
             total = result.total
-            logger.info(f"Channel @{channel_username}: {total} posts")
+            logger.info(f"Channel {channel_identifier}: {total} posts")
             return total
 
         except Exception as e:
-            logger.error(f"Error counting posts in @{channel_username}: {e}")
+            logger.error(f"Error counting posts in {channel_identifier}: {e}")
             raise
 
     async def get_channel_posts(
         self,
-        channel_username: str,
+        channel_identifier: str,
         limit: Optional[int] = None,
         reverse: bool = True,
     ) -> list[PostInfo]:
         """
         Get posts from a Telegram channel.
 
+        Supports public channels (@username), private channels (by ID or invite),
+        and numeric channel IDs (-100...).
+
         Args:
-            channel_username: Channel username (with or without @)
+            channel_identifier: Channel username (with or without @), numeric ID,
+                               or invite hash (+XXXXX)
             limit: Maximum number of posts to fetch. None = all posts
             reverse: If True, fetch oldest first (for transfer order).
                      If False, fetch newest first.
@@ -264,17 +264,13 @@ class TelethonChannelClient:
         """
         client = await self._get_client()
 
-        # Normalize username
-        if channel_username.startswith('@'):
-            channel_username = channel_username[1:]
-
         posts = []
 
         try:
             # iter_messages is memory-efficient for large channels
             # Use _call_with_retry to handle connection errors on initial call
             iterator = client.iter_messages(
-                channel_username,
+                channel_identifier,
                 limit=limit,
                 reverse=reverse,  # oldest first for transfer
             )
@@ -308,11 +304,11 @@ class TelethonChannelClient:
                 )
                 posts.append(post)
 
-            logger.info(f"Fetched {len(posts)} posts from @{channel_username}")
+            logger.info(f"Fetched {len(posts)} posts from {channel_identifier}")
             return posts
 
         except Exception as e:
-            logger.error(f"Error fetching posts from @{channel_username}: {e}")
+            logger.error(f"Error fetching posts from {channel_identifier}: {e}")
             raise
 
 
