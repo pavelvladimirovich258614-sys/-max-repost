@@ -225,8 +225,8 @@ class TransferResult:
         """Calculate completion percentage."""
         if self.total == 0:
             return 0
-        completed = self.success + self.failed + self.skipped + self.duplicates
-        return int((completed / self.total) * 100)
+        # Only count successful transfers for progress bar
+        return int((self.success / self.total) * 100)
 
 
 # =============================================================================
@@ -234,7 +234,7 @@ class TransferResult:
 # =============================================================================
 
 
-ProgressCallback = Callable[[int, int, int, int, int], Any]
+ProgressCallback = Callable[[int, int, int, int, int, Optional[str]], Any]
 """
 Progress callback signature.
 
@@ -244,6 +244,7 @@ Args:
     success: Count of successful transfers so far
     failed: Count of failed transfers so far
     skipped: Count of skipped posts so far
+    status_message: Optional status message for long operations (e.g., "Downloading...")
 
 Returns:
     Optional awaitable (for async UI updates)
@@ -753,6 +754,8 @@ class TransferEngine:
                             tg_channel,
                             max_channel_id,
                             processed_group_ids,
+                            progress_callback,
+                            result,
                         )
                         # Album counts as one transfer operation
                         result.success += 1
@@ -771,6 +774,8 @@ class TransferEngine:
                         await self._transfer_single_post(
                             message,
                             max_channel_id,
+                            progress_callback,
+                            result,
                         )
                         result.success += 1
                         transferred_count += 1
@@ -884,6 +889,8 @@ class TransferEngine:
         self,
         message: Message,
         max_channel_id: str | int | int,
+        progress_callback: Optional[ProgressCallback] = None,
+        result: Optional[TransferResult] = None,
     ) -> None:
         """
         Transfer a single post (not part of an album).
@@ -916,11 +923,11 @@ class TransferEngine:
             case MediaType.PHOTO:
                 await self._transfer_photo(message, max_channel_id, text_chunks)
             case MediaType.VIDEO:
-                await self._transfer_video(message, max_channel_id, text_chunks)
+                await self._transfer_video(message, max_channel_id, text_chunks, progress_callback, result)
             case MediaType.AUDIO:
-                await self._transfer_audio(message, max_channel_id, text_chunks)
+                await self._transfer_audio(message, max_channel_id, text_chunks, progress_callback, result)
             case MediaType.FILE:
-                await self._transfer_file(message, max_channel_id, text_chunks)
+                await self._transfer_file(message, max_channel_id, text_chunks, progress_callback, result)
             case MediaType.UNSUPPORTED:
                 # Unsupported - send as text only
                 for i, chunk in enumerate(text_chunks):
@@ -989,6 +996,8 @@ class TransferEngine:
         message: Message,
         max_channel_id: str | int | int,
         text_chunks: list[str],
+        progress_callback: Optional[ProgressCallback] = None,
+        result: Optional[TransferResult] = None,
     ) -> None:
         """Transfer a video post."""
         # SIZE CHECK - Before downloading
@@ -1014,6 +1023,9 @@ class TransferEngine:
 
         try:
             # STAGE 1 - Downloading
+            await self._notify_progress_with_status(
+                progress_callback, result, "⏳ Скачивание видео..."
+            )
             logger.info(f"Downloading video {message.id} to temp file...")
             start_time = time.time()
             await message.download_media(file=temp_path)
@@ -1033,11 +1045,17 @@ class TransferEngine:
                 raise MaxAPIError("Failed to download video: empty bytes")
 
             # STAGE 2 - Upload
+            await self._notify_progress_with_status(
+                progress_callback, result, "⏳ Загрузка видео в Max..."
+            )
             logger.info(f"Uploading video {message.id}, size={len(video_bytes)} bytes")
             token = await self.max_client.upload_video(video_bytes)
             logger.info(f"Upload successful, token={token[:20]}...")
 
             # STAGE 3 - Sending
+            await self._notify_progress_with_status(
+                progress_callback, result, "⏳ Отправка видео..."
+            )
             logger.info(f"Sending video message to {max_channel_id}")
             first_chunk = text_chunks[0] if text_chunks else ""
             attachment = {"type": "video", "payload": {"token": token}}
@@ -1076,6 +1094,8 @@ class TransferEngine:
         message: Message,
         max_channel_id: str | int | int,
         text_chunks: list[str],
+        progress_callback: Optional[ProgressCallback] = None,
+        result: Optional[TransferResult] = None,
     ) -> None:
         """Transfer an audio post."""
         # SIZE CHECK - Before downloading
@@ -1101,6 +1121,9 @@ class TransferEngine:
 
         try:
             # STAGE 1 - Downloading
+            await self._notify_progress_with_status(
+                progress_callback, result, "⏳ Скачивание аудио..."
+            )
             logger.info(f"Downloading audio {message.id} to temp file...")
             start_time = time.time()
             await message.download_media(file=temp_path)
@@ -1124,6 +1147,9 @@ class TransferEngine:
                 logger.warning(f"Large audio file: {len(audio_bytes)} bytes, may take time...")
 
             # STAGE 2 - Upload
+            await self._notify_progress_with_status(
+                progress_callback, result, "⏳ Загрузка аудио в Max..."
+            )
             logger.info(f"Uploading audio {message.id}, size={len(audio_bytes)} bytes")
             try:
                 token = await self.max_client.upload_audio(audio_bytes)
@@ -1133,6 +1159,9 @@ class TransferEngine:
                 raise
 
             # STAGE 3 - Sending
+            await self._notify_progress_with_status(
+                progress_callback, result, "⏳ Отправка аудио..."
+            )
             logger.info(f"Sending audio message to {max_channel_id}")
             try:
                 # Send first chunk with audio, remaining chunks as separate messages
@@ -1176,6 +1205,8 @@ class TransferEngine:
         message: Message,
         max_channel_id: str | int | int,
         text_chunks: list[str],
+        progress_callback: Optional[ProgressCallback] = None,
+        result: Optional[TransferResult] = None,
     ) -> None:
         """Transfer a file/document post."""
         # SIZE CHECK - Before downloading
@@ -1201,6 +1232,9 @@ class TransferEngine:
 
         try:
             # STAGE 1 - Downloading
+            await self._notify_progress_with_status(
+                progress_callback, result, "⏳ Скачивание файла..."
+            )
             logger.info(f"Downloading file {message.id} to temp file...")
             start_time = time.time()
             await message.download_media(file=temp_path)
@@ -1220,11 +1254,17 @@ class TransferEngine:
                 raise MaxAPIError("Failed to download file: empty bytes")
 
             # STAGE 2 - Upload
+            await self._notify_progress_with_status(
+                progress_callback, result, "⏳ Загрузка файла в Max..."
+            )
             logger.info(f"Uploading file {message.id}, size={len(file_bytes)} bytes")
             token = await self.max_client.upload_file(file_bytes)
             logger.info(f"Upload successful, token={token[:20]}...")
 
             # STAGE 3 - Sending
+            await self._notify_progress_with_status(
+                progress_callback, result, "⏳ Отправка файла..."
+            )
             logger.info(f"Sending file message to {max_channel_id}")
             first_chunk = text_chunks[0] if text_chunks else ""
             attachment = {"type": "file", "payload": {"token": token}}
@@ -1265,6 +1305,8 @@ class TransferEngine:
         tg_channel: str,
         max_channel_id: str | int | int,
         processed_group_ids: set,
+        progress_callback: Optional[ProgressCallback] = None,
+        result: Optional[TransferResult] = None,
     ) -> None:
         """
         Transfer an album (grouped messages) as a single post.
@@ -1275,13 +1317,15 @@ class TransferEngine:
             tg_channel: Channel name
             max_channel_id: Max channel ID
             processed_group_ids: Set of processed group IDs
+            progress_callback: Optional callback for progress updates
+            result: Current transfer result for progress tracking
 
         Raises:
             MaxAPIError: If posting fails
         """
         group_id = first_message.grouped_id
         if not group_id:
-            await self._transfer_single_post(first_message, max_channel_id)
+            await self._transfer_single_post(first_message, max_channel_id, progress_callback, result)
             return
 
         # Mark as processed
@@ -1293,7 +1337,7 @@ class TransferEngine:
         # Full album support would require additional API calls
 
         # For now, transfer as single post with first media
-        await self._transfer_single_post(first_message, max_channel_id)
+        await self._transfer_single_post(first_message, max_channel_id, progress_callback, result)
 
         # TODO: Implement full album support with all media items
         # This would require:
@@ -1394,6 +1438,35 @@ class TransferEngine:
                     success=result.success,
                     failed=result.failed,
                     skipped=result.skipped,
+                    status_message=None,
+                )
+            except Exception as e:
+                logger.error(f"Progress callback error: {e}")
+
+    async def _notify_progress_with_status(
+        self,
+        callback: Optional[ProgressCallback],
+        result: Optional[TransferResult],
+        status_message: str,
+    ) -> None:
+        """
+        Notify progress callback with a status message for long operations.
+
+        Args:
+            callback: Progress callback function
+            result: Current transfer result (may be None during early stages)
+            status_message: Status message to display (e.g., "Downloading...")
+        """
+        if callback and result:
+            try:
+                completed = result.success + result.failed + result.skipped + result.duplicates
+                await callback(
+                    current=completed,
+                    total=result.total,
+                    success=result.success,
+                    failed=result.failed,
+                    skipped=result.skipped,
+                    status_message=status_message,
                 )
             except Exception as e:
                 logger.error(f"Progress callback error: {e}")

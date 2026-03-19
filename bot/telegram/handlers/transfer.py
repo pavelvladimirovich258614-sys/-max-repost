@@ -1503,23 +1503,23 @@ async def _execute_transfer(
         filled = round(current / total * 10)
         return "█" * filled + "░" * (10 - filled)
 
-    async def progress_callback(current: int, total: int, success: int, failed: int, skipped: int) -> None:
+    async def progress_callback(current: int, total: int, success: int, failed: int, skipped: int, status_message: str | None = None) -> None:
         nonlocal posts_since_update
         posts_since_update += 1
         
-        # Update every N posts
-        if posts_since_update < UPDATE_EVERY and current < total:
+        # Update every N posts, or immediately if status message provided
+        if posts_since_update < UPDATE_EVERY and current < total and not status_message:
             return
         posts_since_update = 0
         
-        percent = int((current / total) * 100) if total > 0 else 0
-        bar = build_progress_bar(current, total)
+        percent = int((success / total) * 100) if total > 0 else 0
+        bar = build_progress_bar(success, total)
         
         # Calculate better ETA based on actual elapsed time
         elapsed = time.time() - transfer_start_time
-        if current > 0:
-            avg_time_per_post = elapsed / current
-            remaining_posts = total - current
+        if success > 0:
+            avg_time_per_post = elapsed / success
+            remaining_posts = total - success
             eta_seconds = int(avg_time_per_post * remaining_posts)
         else:
             eta_seconds = 0
@@ -1532,12 +1532,16 @@ async def _execute_transfer(
         else:
             eta_text = f"~{eta_seconds} сек осталось"
 
+        # Build status line if provided
+        status_line = f"\n⏳ {status_message}" if status_message else ""
+
         try:
             await progress_message.edit_text(
                 f"🚀 <b>Перенос в процессе!</b>\n\n"
                 f"📺 Канал: {channel_title}\n"
                 f"📊 Прогресс: {bar} {percent}%\n"
-                f"📤 Перенесено: {current}/{total} ({eta_text})",
+                f"✅ Перенесено: {success}/{total} ({eta_text})"
+                f"{status_line}",
                 parse_mode="HTML",
                 reply_markup=cancel_keyboard,
             )
@@ -1602,9 +1606,13 @@ async def _execute_transfer(
         except Exception as e:
             logger.debug(f"Could not send sticker: {e}")
 
-        # Build final result message
+        # Build final result message with detailed stats
         result_text = (
-            f"✅ <b>Перенос завершён: {result.success} постов</b>\n\n"
+            f"✅ <b>Перенос завершён!</b>\n\n"
+            f"📊 Статистика:\n"
+            f"✅ Перенесено: {result.success}\n"
+            f"⏭ Пропущено: {result.skipped}\n"
+            f"❌ Ошибок: {result.failed}\n\n"
             f"⚡ Хотите подключить автопостинг?\n"
             f"Новые посты будут автоматически появляться в Max."
         )
