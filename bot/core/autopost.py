@@ -286,15 +286,20 @@ class AutopostManager:
                     
                     # Get messages newer than last_post_id
                     # iter_messages with min_id returns messages with id > min_id
-                    async for msg in client.iter_messages(
-                        tg_channel,
-                        min_id=last_post_id,
-                        limit=50,
-                    ):
-                        # Strict check: msg.id must be greater than last_post_id
-                        # and not in processed_ids (extra protection against duplicates)
-                        if msg.id > last_post_id and msg.id not in processed_ids:
-                            new_messages.append(msg)
+                    try:
+                        async for msg in client.iter_messages(
+                            tg_channel,
+                            min_id=last_post_id,
+                            limit=50,
+                        ):
+                            # Strict check: msg.id must be greater than last_post_id
+                            # and not in processed_ids (extra protection against duplicates)
+                            if msg.id > last_post_id and msg.id not in processed_ids:
+                                new_messages.append(msg)
+                    except (ConnectionError, asyncio.TimeoutError, OSError) as e:
+                        logger.warning(f"Connection lost in polling for @{tg_channel}, will retry: {e}")
+                        await asyncio.sleep(self.ERROR_INTERVAL)
+                        continue  # Don't stop polling, continue to next iteration
                     
                     if new_messages:
                         # Sort by ID ascending (oldest first) to process in order
@@ -351,6 +356,10 @@ class AutopostManager:
                 except asyncio.CancelledError:
                     logger.info(f"Autopost polling cancelled: @{tg_channel}")
                     raise
+                except (ConnectionError, asyncio.TimeoutError, OSError) as e:
+                    logger.warning(f"Connection lost in polling for @{tg_channel}, will retry: {e}")
+                    await asyncio.sleep(self.ERROR_INTERVAL)
+                    continue  # Don't stop polling, continue to next iteration
                 except Exception as e:
                     logger.error(
                         f"Autopost polling error for @{tg_channel}: {e}",

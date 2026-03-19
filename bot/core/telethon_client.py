@@ -7,6 +7,7 @@ IMPORTANT: GetHistoryRequest requires a USER session, not bot token.
 Run scripts/auth_telethon.py once to authorize and create the session file.
 """
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -15,6 +16,10 @@ from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMe
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.errors import SessionPasswordNeededError
 from loguru import logger
+
+
+# Constants
+MAX_RETRIES = 3
 
 
 # Session file path
@@ -56,6 +61,7 @@ class TelethonChannelClient:
         self.phone = phone
         self._client: Optional[TelegramClient] = None
         self._session_path = Path(SESSION_FILE + ".session")
+        self._keepalive_task: Optional[asyncio.Task] = None
 
     def _is_session_exists(self) -> bool:
         """Check if session file exists."""
@@ -95,6 +101,11 @@ class TelethonChannelClient:
             await self._client.start(phone=self.phone)
             logger.info(f"Telethon client started with user session: {self.phone}")
             
+            # Start keepalive task to maintain connection
+            if self._keepalive_task is None or self._keepalive_task.done():
+                self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+                logger.info("Telethon keepalive task started")
+            
         return self._client
     
     async def run_until_disconnected(self) -> None:
@@ -118,10 +129,59 @@ class TelethonChannelClient:
 
     async def close(self) -> None:
         """Close the Telethon client."""
+        # Cancel keepalive task
+        if self._keepalive_task and not self._keepalive_task.done():
+            self._keepalive_task.cancel()
+            try:
+                await self._keepalive_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("Telethon keepalive task stopped")
+        
         if self._client:
             await self._client.disconnect()
             self._client = None
             logger.info("Telethon client disconnected")
+
+    async def _call_with_retry(self, method, *args, **kwargs):
+        """Call a Telethon method with retry logic for connection errors.
+        
+        Args:
+            method: The async method to call
+            *args, **kwargs: Arguments to pass to the method
+            
+        Returns:
+            The result of the method call
+            
+        Raises:
+            ConnectionError: If all retries fail
+        """
+        for attempt in range(MAX_RETRIES):
+            try:
+                return await method(*args, **kwargs)
+            except (ConnectionError, asyncio.TimeoutError, OSError) as e:
+                logger.warning(f"Telethon connection lost, reconnecting... attempt {attempt+1}")
+                try:
+                    await self._client.connect()
+                except Exception:
+                    pass
+                await asyncio.sleep(2 ** attempt)
+        raise ConnectionError(f"Failed after {MAX_RETRIES} attempts")
+
+    async def _keepalive_loop(self):
+        """Keep connection alive by periodic get_me() calls."""
+        while True:
+            try:
+                await asyncio.sleep(300)  # 5 minutes
+                if self._client and self._client.is_connected():
+                    await self._client.get_me()
+                    logger.debug("Keepalive ping sent")
+            except Exception as e:
+                logger.warning(f"Keepalive failed: {e}")
+                try:
+                    await self._client.connect()
+                except Exception:
+                    pass
 
     async def get_channel_description(self, channel: str) -> str:
         """
@@ -143,8 +203,8 @@ class TelethonChannelClient:
             channel = channel[1:]
 
         try:
-            entity = await client.get_entity(channel)
-            full = await client(GetFullChannelRequest(entity))
+            entity = await self._call_with_retry(client.get_entity, channel)
+            full = await self._call_with_retry(client, GetFullChannelRequest(entity))
             return full.full_chat.about or ""
         except Exception as e:
             logger.error(f"Error getting channel description for {channel}: {e}")
@@ -172,7 +232,7 @@ class TelethonChannelClient:
         try:
             # get_messages with limit=0 returns only total count
             # This is efficient - doesn't fetch actual messages
-            result = await client.get_messages(channel_username, limit=0)
+            result = await self._call_with_retry(client.get_messages, channel_username, limit=0)
             total = result.total
             logger.info(f"Channel @{channel_username}: {total} posts")
             return total
@@ -212,11 +272,13 @@ class TelethonChannelClient:
 
         try:
             # iter_messages is memory-efficient for large channels
-            async for message in client.iter_messages(
+            # Use _call_with_retry to handle connection errors on initial call
+            iterator = client.iter_messages(
                 channel_username,
                 limit=limit,
                 reverse=reverse,  # oldest first for transfer
-            ):
+            )
+            async for message in iterator:
                 # Determine media type
                 media_type = None
                 has_media = False
