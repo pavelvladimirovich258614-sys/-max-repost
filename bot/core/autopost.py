@@ -15,7 +15,7 @@ from loguru import logger
 from telethon.tl.types import Message
 
 from bot.core.transfer_engine import convert_entities_to_html
-from bot.max_api.client import MaxClient
+from bot.max_api.client import MaxClient, AttachmentNotReadyError
 from bot.database.balance import get_balance, charge_autopost_with_subscription
 from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
 from bot.database.repositories.balance import UserBalanceRepository
@@ -536,6 +536,47 @@ class AutopostManager:
         logger.info(f"Autopost: @{tg_channel} album with {len(messages)} parts transferred")
         return True
     
+    async def _send_album_with_retry(
+        self,
+        max_chat_id: int,
+        text: str,
+        attachments: list[dict],
+        format_type: str | None,
+        max_retries: int = 5,
+    ) -> None:
+        """
+        Send album with multiple attachments, retrying on attachment.not.ready error.
+        
+        Args:
+            max_chat_id: Target chat ID
+            text: Message text
+            attachments: List of attachment dicts
+            format_type: Text format (html or None)
+            max_retries: Maximum number of retry attempts
+        """
+        for attempt in range(max_retries):
+            try:
+                await self.max_client.send_message(
+                    chat_id=max_chat_id,
+                    text=text,
+                    attachments=attachments,
+                    format=format_type,
+                )
+                if attempt > 0:
+                    logger.info(f"Album sent successfully after {attempt + 1} attempts")
+                return
+            except AttachmentNotReadyError:
+                if attempt < max_retries - 1:
+                    wait = 3 * (attempt + 1)  # 3, 6, 9, 12, 15 seconds
+                    logger.info(f"Album attachments not ready, waiting {wait}s... (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(f"Album attachments not ready after {max_retries} attempts, giving up")
+                    raise
+            except Exception:
+                # Other errors - don't retry
+                raise
+
     async def _do_forward_album(self, messages: list[Message], max_chat_id: int) -> None:
         """
         Execute the actual forwarding of an album to Max.
@@ -594,23 +635,23 @@ class AutopostManager:
             return
         
         try:
-            # Send all attachments as a group
-            await self.max_client.send_message(
-                chat_id=max_chat_id,
+            # Send all attachments as a group with retry for attachment.not.ready
+            await self._send_album_with_retry(
+                max_chat_id=max_chat_id,
                 text=text,
                 attachments=attachments,
-                format=format_type,
+                format_type=format_type,
             )
         except Exception as e:
             logger.error(f"Failed to send album: {e}")
             # Fallback: try sending attachments one by one
             for attachment in attachments:
                 try:
-                    await self.max_client.send_message(
-                        chat_id=max_chat_id,
+                    await self._send_message_with_attachment_retry(
+                        max_chat_id=max_chat_id,
                         text=text if attachment == attachments[0] else "",
-                        attachments=[attachment],
-                        format=format_type,
+                        attachment=attachment,
+                        format_type=format_type,
                     )
                 except Exception as e2:
                     logger.error(f"Failed to send individual attachment: {e2}")
@@ -1110,6 +1151,50 @@ class AutopostManager:
                     format=format_type,
                 )
     
+    async def _send_message_with_attachment_retry(
+        self,
+        max_chat_id: int,
+        text: str,
+        attachment: dict,
+        format_type: str | None,
+        max_retries: int = 5,
+    ) -> None:
+        """
+        Send message with attachment, retrying on attachment.not.ready error.
+        
+        Max API needs time to process uploaded files. This method retries
+        with exponential backoff (3, 6, 9, 12, 15 seconds = 45s total max).
+        
+        Args:
+            max_chat_id: Target chat ID
+            text: Message text
+            attachment: Attachment dict with type and payload
+            format_type: Text format (html or None)
+            max_retries: Maximum number of retry attempts
+        """
+        for attempt in range(max_retries):
+            try:
+                await self.max_client.send_message(
+                    chat_id=max_chat_id,
+                    text=text,
+                    attachments=[attachment],
+                    format=format_type,
+                )
+                if attempt > 0:
+                    logger.info(f"Message sent successfully after {attempt + 1} attempts")
+                return
+            except AttachmentNotReadyError:
+                if attempt < max_retries - 1:
+                    wait = 3 * (attempt + 1)  # 3, 6, 9, 12, 15 seconds
+                    logger.info(f"Attachment not ready, waiting {wait}s... (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(f"Attachment not ready after {max_retries} attempts, giving up")
+                    raise
+            except Exception:
+                # Other errors - don't retry
+                raise
+
     async def _forward_video(
         self,
         message: Message,
@@ -1136,11 +1221,12 @@ class AutopostManager:
             token = await self.max_client.upload_video(path)
             attachment = {"type": "video", "payload": {"token": token}}
             
-            await self.max_client.send_message(
-                chat_id=max_chat_id,
+            # Send with retry for attachment.not.ready
+            await self._send_message_with_attachment_retry(
+                max_chat_id=max_chat_id,
                 text=text,
-                attachments=[attachment],
-                format=format_type,
+                attachment=attachment,
+                format_type=format_type,
             )
             logger.info(f"Sent video to Max: {path}")
         except Exception as e:
@@ -1182,11 +1268,12 @@ class AutopostManager:
             token = await self.max_client.upload_audio(path)
             attachment = {"type": "audio", "payload": {"token": token}}
             
-            await self.max_client.send_message(
-                chat_id=max_chat_id,
+            # Send with retry for attachment.not.ready
+            await self._send_message_with_attachment_retry(
+                max_chat_id=max_chat_id,
                 text=text,
-                attachments=[attachment],
-                format=format_type,
+                attachment=attachment,
+                format_type=format_type,
             )
             logger.info(f"Sent audio to Max: {path}")
         except Exception as e:
@@ -1228,11 +1315,12 @@ class AutopostManager:
             token = await self.max_client.upload_file(path)
             attachment = {"type": "file", "payload": {"token": token}}
             
-            await self.max_client.send_message(
-                chat_id=max_chat_id,
+            # Send with retry for attachment.not.ready
+            await self._send_message_with_attachment_retry(
+                max_chat_id=max_chat_id,
                 text=text,
-                attachments=[attachment],
-                format=format_type,
+                attachment=attachment,
+                format_type=format_type,
             )
             logger.info(f"Sent document to Max: {path}")
         except Exception as e:

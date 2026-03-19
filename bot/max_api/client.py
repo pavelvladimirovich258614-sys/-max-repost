@@ -3,6 +3,8 @@
 import asyncio
 import json
 import os
+import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -774,13 +776,16 @@ class MaxClient:
 
     async def _handle_upload_response(self, response) -> dict:
         """
-        Handle upload response and parse JSON.
+        Handle upload response and parse JSON or XML.
+
+        Max API may return XML for some upload types (e.g., audio: <retval>1</retval>).
+        This method tries JSON first, then falls back to XML parsing.
 
         Args:
             response: aiohttp response object
 
         Returns:
-            Parsed JSON response data
+            Parsed JSON response data, or dict with 'retval' for XML responses
 
         Raises:
             MaxAPIError: On upload failure
@@ -797,16 +802,37 @@ class MaxClient:
                 status_code=response.status,
             )
 
-        # Parse response JSON
+        # Parse response JSON first
         try:
-            import json
             response_data = json.loads(response_text)
+            logger.info(f"Parsed JSON response data keys: {list(response_data.keys()) if response_data else 'empty'}")
+            return response_data if isinstance(response_data, dict) else {}
         except (json.JSONDecodeError, aiohttp.ContentTypeError):
-            logger.warning(f"Failed to parse JSON response, using empty dict")
-            response_data = {}
+            pass
 
-        logger.info(f"Parsed response data keys: {list(response_data.keys()) if response_data else 'empty'}")
-        return response_data if isinstance(response_data, dict) else {}
+        # Fallback: try to parse XML (e.g., <retval>1</retval>)
+        try:
+            # Look for <retval>value</retval> pattern
+            match = re.search(r'<retval>([^<]*)</retval>', response_text)
+            if match:
+                retval_value = match.group(1)
+                logger.info(f"Parsed XML retval: {retval_value}")
+                return {"retval": retval_value, "_xml_parsed": True}
+
+            # Try full XML parsing
+            root = ET.fromstring(response_text.strip())
+            retval_elem = root.find('retval')
+            if retval_elem is not None:
+                logger.info(f"Parsed XML retval: {retval_elem.text}")
+                return {"retval": retval_elem.text, "_xml_parsed": True}
+        except ET.ParseError:
+            pass
+        except Exception as e:
+            logger.debug(f"XML parsing failed: {e}")
+
+        # If all parsing failed, return empty dict (token comes from upload_info for some types)
+        logger.warning(f"Failed to parse response as JSON or XML, using empty dict. Response: {response_text[:200]}")
+        return {}
 
     async def upload_image(self, file_path: str | Path | bytes) -> str:
         """
@@ -962,6 +988,12 @@ class MaxClient:
         # По документации токен для audio приходит на шаге 1 (upload_info.token)
         # Но проверим и ответ шага 2 на случай вложенной структуры
         token = upload_info.token
+
+        # If response was XML (e.g., <retval>1</retval>), use token from upload_info
+        if upload_response.get("_xml_parsed") and token:
+            logger.info(f"Using token from upload_info (XML response): {token[:20] if token else 'empty'}...")
+            return token
+
         if not token and "audios" in upload_response:
             audios = upload_response["audios"]
             if audios:
@@ -971,6 +1003,10 @@ class MaxClient:
 
         if not token:
             token = upload_response.get("token", upload_info.token)
+
+        if not token:
+            logger.error(f"No token available for audio upload. upload_info.token={upload_info.token}, response={upload_response}")
+            raise MaxAPIError("No token returned for audio upload")
 
         logger.debug(f"Audio uploaded, token: {token[:20] if token else 'empty'}...")
         return token
