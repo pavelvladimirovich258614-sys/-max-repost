@@ -500,12 +500,13 @@ def should_skip_message(message: Message, post_index: int = 0) -> tuple[bool, st
 
     # === CONTENT FILTER: Text-only messages without media ===
     # Only filter if there is NO media (photos, videos, audio, etc. pass through)
+    # Messages with media are NEVER skipped based on text length
     if not has_media and has_text:
         raw_text = message.raw_text or message.text or message.message or ""
         text_len = len(raw_text.strip())
         
         # Skip short text-only messages (likely chat chatter)
-        if text_len < 50:
+        if text_len < 20:
             preview = raw_text[:30].replace('\n', ' ')
             logger.info(f"Post {post_index}: SKIP - short text ({text_len} chars): '{preview}'")
             return True, f"short text: {text_len} chars"

@@ -693,8 +693,6 @@ class MaxClient:
         Max API spec: POST {url} with multipart/form-data, field name="data"
         IMPORTANT: Upload URL is pre-signed, no Authorization header needed.
 
-        For large files (>50MB), uses resumable upload (no Content-Type header).
-
         Args:
             url: Upload URL from initiate step
             file_path: Path to file or file content as bytes
@@ -717,28 +715,20 @@ class MaxClient:
             # Streaming upload from file - memory efficient for large files
             file_path_str = str(file_path)
             file_size = os.path.getsize(file_path_str)
-            use_resumable = file_size > 50 * 1024 * 1024  # > 50MB
-
             logger.info(f"Streaming upload: {filename}, size={file_size} bytes, timeout=600s")
 
             async with aiohttp.ClientSession(timeout=timeout) as upload_session:
                 with open(file_path_str, 'rb') as f:
-                    if use_resumable:
-                        # Resumable upload: NO Content-Type header, raw binary data
-                        logger.info(f"Using resumable upload for large file ({file_size} bytes)")
-                        async with upload_session.post(url, data=f) as response:
-                            return await self._handle_upload_response(response)
-                    else:
-                        # Standard multipart upload with streaming
-                        form = aiohttp.FormData()
-                        form.add_field(
-                            'data',  # Field name must be exactly "data" per Max API spec
-                            f,
-                            filename=filename,
-                            content_type=content_type,
-                        )
-                        async with upload_session.post(url, data=form) as response:
-                            return await self._handle_upload_response(response)
+                    # Standard multipart upload with streaming (always, no resumable)
+                    form = aiohttp.FormData()
+                    form.add_field(
+                        'data',  # Field name must be exactly "data" per Max API spec
+                        f,
+                        filename=filename,
+                        content_type=content_type,
+                    )
+                    async with upload_session.post(url, data=form) as response:
+                        return await self._handle_upload_response(response)
         else:
             # Bytes upload (backward compatibility)
             if isinstance(file_path, (str, Path)):
@@ -748,31 +738,23 @@ class MaxClient:
 
             file_content = file_path
             file_size = len(file_content)
-            use_resumable = file_size > 50 * 1024 * 1024  # > 50MB
 
             logger.info(f"Uploading from bytes: {filename}, size={file_size} bytes, timeout=600s")
-            logger.info(f"First 4 bytes: {file_content[:4]}")
 
             if not file_content or file_size == 0:
                 raise MaxAPIError("Cannot upload empty file")
 
             async with aiohttp.ClientSession(timeout=timeout) as upload_session:
-                if use_resumable:
-                    # Resumable upload: NO Content-Type header, raw binary data
-                    logger.info(f"Using resumable upload for large file ({file_size} bytes)")
-                    async with upload_session.post(url, data=file_content) as response:
-                        return await self._handle_upload_response(response)
-                else:
-                    # Standard multipart upload
-                    form = aiohttp.FormData()
-                    form.add_field(
-                        'data',  # Field name must be exactly "data" per Max API spec
-                        file_content,
-                        filename=filename,
-                        content_type=content_type,
-                    )
-                    async with upload_session.post(url, data=form) as response:
-                        return await self._handle_upload_response(response)
+                # Standard multipart upload (always, no resumable)
+                form = aiohttp.FormData()
+                form.add_field(
+                    'data',  # Field name must be exactly "data" per Max API spec
+                    file_content,
+                    filename=filename,
+                    content_type=content_type,
+                )
+                async with upload_session.post(url, data=form) as response:
+                    return await self._handle_upload_response(response)
 
     async def _handle_upload_response(self, response) -> dict:
         """
