@@ -1,7 +1,11 @@
 """Main entry point for the Max-Repost Bot."""
 
+import warnings
+warnings.filterwarnings("ignore", message="Field.*model_custom_emoji_id.*")
+
 import asyncio
 import logging
+import signal
 
 from loguru import logger
 
@@ -16,8 +20,11 @@ from bot.database.repositories.autopost_subscription import AutopostSubscription
 from bot.database.connection import get_session
 from bot.payments.yookassa_client import YooKassaClient
 from bot.payments.payment_checker import check_pending_payments
-from bot.payments.webhook_server import start_webhook_server
+from bot.payments.webhook_server import start_webhook_server, cleanup_webhook_server
 from config.settings import settings
+
+# Global shutdown event for coordinating graceful shutdown
+shutdown_event = asyncio.Event()
 
 
 async def init_db() -> None:
@@ -75,6 +82,101 @@ async def _run_column_migrations() -> None:
                 logger.info("Migration: Added email column to users table")
         except Exception as e:
             logger.warning(f"Migration warning (email): {e}")
+        
+        # Migration 3: Check if referral_code column exists in users table
+        try:
+            result = await conn.execute(
+                text("SELECT 1 FROM pragma_table_info('users') WHERE name='referral_code'")
+            )
+            column_exists = result.scalar() is not None
+            
+            if not column_exists:
+                await conn.execute(
+                    text("ALTER TABLE users ADD COLUMN referral_code TEXT DEFAULT NULL")
+                )
+                logger.info("Migration: Added referral_code column to users table")
+        except Exception as e:
+            logger.warning(f"Migration warning (referral_code): {e}")
+        
+        # Migration 4: Check if referred_by column exists in users table
+        try:
+            result = await conn.execute(
+                text("SELECT 1 FROM pragma_table_info('users') WHERE name='referred_by'")
+            )
+            column_exists = result.scalar() is not None
+            
+            if not column_exists:
+                await conn.execute(
+                    text("ALTER TABLE users ADD COLUMN referred_by INTEGER DEFAULT NULL")
+                )
+                logger.info("Migration: Added referred_by column to users table")
+        except Exception as e:
+            logger.warning(f"Migration warning (referred_by): {e}")
+
+
+async def _graceful_shutdown_tasks(loop: asyncio.AbstractEventLoop, timeout: float = 10.0) -> None:
+    """
+    Gracefully shutdown all tasks with timeout.
+    
+    First gives tasks time to finish naturally, then cancels remaining ones.
+    
+    Args:
+        loop: The asyncio event loop
+        timeout: Total timeout in seconds for graceful shutdown
+    """
+    logger.info(f"Allowing tasks {timeout}s to finish gracefully...")
+    
+    # Get all tasks except current
+    current_task = asyncio.current_task(loop)
+    all_tasks = [task for task in asyncio.all_tasks(loop) if task is not current_task]
+    
+    if not all_tasks:
+        logger.debug("No tasks to clean up")
+        return
+    
+    # Wait for tasks to complete naturally (give them a chance to respond to shutdown_event)
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*all_tasks, return_exceptions=True),
+            timeout=timeout
+        )
+        logger.info("All tasks finished gracefully")
+    except asyncio.TimeoutError:
+        logger.warning(f"Timeout after {timeout}s, cancelling remaining tasks...")
+        # Cancel any remaining tasks
+        for task in all_tasks:
+            if not task.done():
+                task.cancel()
+        # Wait briefly for cancellations to complete
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*[t for t in all_tasks if not t.done()], return_exceptions=True),
+                timeout=2.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Some tasks did not cancel in time")
+
+
+def setup_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
+    """
+    Set up signal handlers for graceful shutdown on SIGTERM and SIGINT.
+    
+    Args:
+        loop: The asyncio event loop to use for signal handling
+    """
+    def handle_signal(sig: signal.Signals) -> None:
+        logger.info(f"Received signal {sig.name}, initiating graceful shutdown...")
+        shutdown_event.set()
+        # Schedule graceful shutdown in the event loop
+        asyncio.create_task(_graceful_shutdown_tasks(loop, timeout=10.0))
+    
+    try:
+        loop.add_signal_handler(signal.SIGTERM, lambda: handle_signal(signal.SIGTERM))
+        loop.add_signal_handler(signal.SIGINT, lambda: handle_signal(signal.SIGINT))
+        logger.info("Signal handlers registered (SIGTERM, SIGINT)")
+    except NotImplementedError:
+        # Windows doesn't support add_signal_handler, but we're targeting Linux VPS
+        logger.warning("Signal handlers not supported on this platform")
 
 
 async def main() -> None:
@@ -85,6 +187,10 @@ async def main() -> None:
     Also starts Max bot listener for responding to messages in Max messenger.
     Telethon client runs in parallel for receiving channel updates.
     """
+    # Get the event loop and set up signal handlers early
+    loop = asyncio.get_running_loop()
+    setup_signal_handlers(loop)
+    
     # Initialize logger
     init_logger()
     logger.info("Max-Repost Bot starting...")
@@ -144,6 +250,11 @@ async def main() -> None:
     listener_task = asyncio.create_task(max_listener.start())
     logger.info("Max bot listener started")
 
+    # Store tasks for cleanup
+    all_tasks = [payment_checker_task, listener_task]
+    if webhook_task:
+        all_tasks.append(webhook_task)
+
     # Start polling and Telethon event loop in parallel
     try:
         await asyncio.gather(
@@ -164,7 +275,7 @@ async def main() -> None:
         # Stop all autopost tasks
         if autopost_manager:
             try:
-                await asyncio.wait_for(autopost_manager.stop_all(), timeout=15.0)
+                await asyncio.wait_for(autopost_manager.stop_all(), timeout=5.0)
             except asyncio.TimeoutError:
                 logger.warning("Autopost manager stop timed out")
         
@@ -172,7 +283,7 @@ async def main() -> None:
         try:
             await max_listener.stop()
             listener_task.cancel()
-            await asyncio.wait_for(listener_task, timeout=5.0)
+            await asyncio.wait_for(listener_task, timeout=2.0)
         except asyncio.TimeoutError:
             logger.warning("Max listener task stop timed out")
         except asyncio.CancelledError:
@@ -183,7 +294,7 @@ async def main() -> None:
         # Cancel payment checker
         try:
             payment_checker_task.cancel()
-            await asyncio.wait_for(payment_checker_task, timeout=5.0)
+            await asyncio.wait_for(payment_checker_task, timeout=2.0)
             logger.debug("Payment checker stopped")
         except asyncio.TimeoutError:
             logger.warning("Payment checker stop timed out")
@@ -192,11 +303,14 @@ async def main() -> None:
         except Exception as e:
             logger.error(f"Payment checker error: {e}")
         
-        # Cancel webhook server
+        # Cancel webhook server and cleanup runner
         if webhook_task:
             try:
+                # First cleanup the runner (stops the server properly)
+                await cleanup_webhook_server()
+                # Then cancel the task
                 webhook_task.cancel()
-                await asyncio.wait_for(webhook_task, timeout=5.0)
+                await asyncio.wait_for(webhook_task, timeout=2.0)
                 logger.debug("Webhook server stopped")
             except asyncio.TimeoutError:
                 logger.warning("Webhook server stop timed out")

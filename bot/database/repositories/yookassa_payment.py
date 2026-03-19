@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.models import YooKassaPayment
@@ -162,3 +162,47 @@ class YooKassaPaymentRepository(BaseRepository[YooKassaPayment]):
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def sum_succeeded(self) -> Decimal:
+        """
+        Sum all succeeded payments.
+
+        Returns:
+            Total amount of succeeded payments
+        """
+        stmt = select(func.sum(YooKassaPayment.amount)).where(
+            YooKassaPayment.status == "succeeded"
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar() or Decimal("0")
+
+    async def sum_by_period(self, days: int) -> Decimal:
+        """
+        Sum succeeded payments for the last N days.
+
+        Args:
+            days: Number of days to look back
+
+        Returns:
+            Total amount of succeeded payments in the period
+        """
+        since = datetime.utcnow() - timedelta(days=days)
+        stmt = select(func.sum(YooKassaPayment.amount)).where(
+            YooKassaPayment.status == "succeeded",
+            YooKassaPayment.created_at >= since
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar() or Decimal("0")
+
+    async def count_pending(self) -> int:
+        """
+        Count pending payments.
+
+        Returns:
+            Number of pending payments
+        """
+        stmt = select(func.count(YooKassaPayment.id)).where(
+            YooKassaPayment.status == "pending"
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar() or 0

@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from sqlalchemy import select, update, delete
+from sqlalchemy import select, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.models import AutopostSubscription
@@ -277,3 +277,28 @@ class AutopostSubscriptionRepository(BaseRepository[AutopostSubscription]):
         )
         result = await self._session.execute(stmt)
         return result.scalars().first()
+
+    async def count_active(self) -> int:
+        """
+        Count active subscriptions.
+
+        Returns:
+            Number of active subscriptions
+        """
+        stmt = select(func.count(self._model.id)).where(self._model.is_active == True)
+        result = await self._session.execute(stmt)
+        return result.scalar() or 0
+
+    async def count_by_user(self, user_id: int) -> int:
+        """
+        Count subscriptions for a user.
+
+        Args:
+            user_id: Telegram user ID
+
+        Returns:
+            Number of subscriptions
+        """
+        stmt = select(func.count(self._model.id)).where(self._model.user_id == user_id)
+        result = await self._session.execute(stmt)
+        return result.scalar() or 0

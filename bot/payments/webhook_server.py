@@ -10,6 +10,9 @@ from bot.database.repositories.yookassa_payment import YooKassaPaymentRepository
 from bot.database.repositories.balance import UserBalanceRepository, BalanceTransactionRepository
 from bot.payments.yookassa_client import YooKassaClient
 
+# Global runner reference for cleanup
+_webhook_runner = None
+
 
 async def handle_webhook(request: web.Request) -> web.Response:
     """Handle incoming YooKassa webhook."""
@@ -84,17 +87,36 @@ async def start_webhook_server(
     port: int = 8080,
 ) -> None:
     """Start the webhook server."""
+    global _webhook_runner
+    
     app = web.Application()
     app.router.add_post("/webhook/yookassa", handle_webhook)
     
-    runner = web.AppRunner(app)
-    await runner.setup()
+    _webhook_runner = web.AppRunner(app)
+    await _webhook_runner.setup()
     
-    site = web.TCPSite(runner, host, port)
+    site = web.TCPSite(_webhook_runner, host, port)
     await site.start()
     
     logger.info(f"Webhook server started on http://{host}:{port}/webhook/yookassa")
     
-    # Keep running
-    while True:
-        await asyncio.sleep(3600)
+    # Keep running until cancelled
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        logger.info("Webhook server task cancelled")
+        raise
+
+
+async def cleanup_webhook_server() -> None:
+    """Cleanup the webhook server runner."""
+    global _webhook_runner
+    if _webhook_runner is not None:
+        try:
+            await _webhook_runner.cleanup()
+            logger.debug("Webhook server runner cleaned up")
+        except Exception as e:
+            logger.error(f"Error cleaning up webhook server: {e}")
+        finally:
+            _webhook_runner = None

@@ -1,8 +1,10 @@
 """User repository for user-related database operations."""
 
+import random
+import string
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
 
@@ -69,6 +71,108 @@ class UserRepository(BaseRepository[User]):
         result = await self._session.execute(stmt)
         return result.scalars().first()
 
+    def _generate_referral_code(self) -> str:
+        """
+        Generate a unique 8-character referral code.
+        
+        Returns:
+            Unique referral code (uppercase letters + digits)
+        """
+        return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    
+    async def _generate_unique_referral_code(self) -> str:
+        """
+        Generate a unique referral code and ensure it doesn't exist.
+        
+        Returns:
+            Unique referral code
+        """
+        max_attempts = 10
+        for _ in range(max_attempts):
+            code = self._generate_referral_code()
+            existing = await self.get_by_referral_code(code)
+            if existing is None:
+                return code
+        # Fallback: add timestamp to ensure uniqueness
+        import time
+        return f"{self._generate_referral_code()}{int(time.time()) % 100}"
+    
+    async def get_by_referral_code(self, code: str) -> User | None:
+        """
+        Get user by referral code.
+        
+        Args:
+            code: Referral code
+            
+        Returns:
+            User instance or None
+        """
+        stmt = select(User).where(User.referral_code == code)
+        result = await self._session.execute(stmt)
+        return result.scalars().first()
+    
+    async def set_referral_code(self, user_id: int, code: str) -> User | None:
+        """
+        Set referral code for user.
+        
+        Args:
+            user_id: User ID
+            code: Referral code to set
+            
+        Returns:
+            Updated user instance or None
+        """
+        stmt = (
+            update(User)
+            .where(User.id == user_id)
+            .values(referral_code=code)
+            .returning(User)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalars().first()
+    
+    async def set_referred_by(self, user_id: int, referrer_id: int) -> User | None:
+        """
+        Set referrer for user (can only be set once).
+        
+        Args:
+            user_id: User ID (the new user being referred)
+            referrer_id: Telegram ID of referrer
+            
+        Returns:
+            Updated user instance or None if already set
+        """
+        # Check if already has a referrer
+        stmt = select(User).where(User.id == user_id)
+        result = await self._session.execute(stmt)
+        user = result.scalars().first()
+        
+        if user is None or user.referred_by is not None:
+            return None
+        
+        stmt = (
+            update(User)
+            .where(User.id == user_id)
+            .values(referred_by=referrer_id)
+            .returning(User)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalars().first()
+    
+    async def count_referrals(self, referrer_id: int) -> int:
+        """
+        Count number of users referred by a user.
+        
+        Args:
+            referrer_id: Telegram ID of referrer
+            
+        Returns:
+            Number of referrals
+        """
+        stmt = select(func.count(User.id)).where(User.referred_by == referrer_id)
+        result = await self._session.execute(stmt)
+        return result.scalar() or 0
+    
     async def get_or_create(self, telegram_id: int) -> tuple[User, bool]:
         """
         Get existing user or create new one.
@@ -83,7 +187,9 @@ class UserRepository(BaseRepository[User]):
         if user is not None:
             return user, False
 
-        user = await self.create(telegram_id=telegram_id)
+        # Generate unique referral code for new user
+        referral_code = await self._generate_unique_referral_code()
+        user = await self.create(telegram_id=telegram_id, referral_code=referral_code)
         return user, True
 
     async def update_balance(
@@ -210,35 +316,37 @@ class UserRepository(BaseRepository[User]):
         result = await self._session.execute(stmt)
         return result.scalars().first()
 
-    async def get_email(self, telegram_id: int) -> str | None:
+    async def count_all(self) -> int:
         """
-        Get user email by Telegram ID.
-        
-        Args:
-            telegram_id: Telegram user ID
-            
-        Returns:
-            User email or None
-        """
-        user = await self.get_by_telegram_id(telegram_id)
-        return user.email if user else None
+        Count all users.
 
-    async def set_email(self, telegram_id: int, email: str) -> User | None:
-        """
-        Set user email.
-        
-        Args:
-            telegram_id: Telegram user ID
-            email: Email to set
-            
         Returns:
-            Updated user instance or None
+            Number of users
+        """
+        stmt = select(func.count(User.id))
+        result = await self._session.execute(stmt)
+        return result.scalar() or 0
+
+    async def get_all_paginated(
+        self,
+        page: int,
+        per_page: int,
+    ) -> list[User]:
+        """
+        Get all users with pagination.
+
+        Args:
+            page: Page number (1-based)
+            per_page: Number of items per page
+
+        Returns:
+            List of User instances
         """
         stmt = (
-            update(User)
-            .where(User.telegram_id == telegram_id)
-            .values(email=email)
-            .returning(User)
+            select(User)
+            .order_by(User.created_at.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
         )
         result = await self._session.execute(stmt)
-        return result.scalars().first()
+        return list(result.scalars().all())

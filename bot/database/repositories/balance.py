@@ -3,7 +3,7 @@
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.models import UserBalance, BalanceTransaction
@@ -240,3 +240,21 @@ class BalanceTransactionRepository(BaseRepository[BalanceTransaction]):
             "total_deposited": sum(t.amount for t in deposits),
             "total_charged": sum(abs(t.amount) for t in charges),
         }
+    
+    async def get_referral_earnings(self, user_id: int) -> Decimal:
+        """
+        Get total referral earnings for a user.
+        
+        Args:
+            user_id: Telegram user ID
+            
+        Returns:
+            Total referral earnings in rubles
+        """
+        stmt = select(func.sum(BalanceTransaction.amount)).where(
+            BalanceTransaction.user_id == user_id,
+            BalanceTransaction.transaction_type == "referral_bonus"
+        )
+        result = await self._session.execute(stmt)
+        total = result.scalar()
+        return total if total is not None else Decimal("0.00")

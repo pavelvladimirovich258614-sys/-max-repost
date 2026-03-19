@@ -77,6 +77,8 @@ class User(Base, TimestampMixin):
         bonus_received: Whether user received bonus for channel subscription
         is_admin: Admin privileges flag
         free_posts_used: Number of free trial posts already used (max 5)
+        referral_code: Unique referral code (8 chars)
+        referred_by: Telegram ID of referrer
     """
 
     __tablename__ = "users"
@@ -93,6 +95,17 @@ class User(Base, TimestampMixin):
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     free_posts_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    referral_code: Mapped[str | None] = mapped_column(
+        String(8),
+        unique=True,
+        index=True,
+        nullable=True,
+    )
+    referred_by: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.telegram_id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     # Constants
     FREE_POSTS_LIMIT = 5  # Maximum free posts per user
@@ -121,6 +134,13 @@ class User(Base, TimestampMixin):
         back_populates="user",
         cascade="all, delete",
         passive_deletes=True,
+    )
+    # Referral relationship
+    referrals: Mapped[list["User"]] = relationship(
+        "User",
+        backref="referrer",
+        remote_side=[telegram_id],
+        foreign_keys=[referred_by],
     )
 
     def __repr__(self) -> str:

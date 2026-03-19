@@ -1,0 +1,339 @@
+"""Admin panel handlers."""
+
+from aiogram import Router
+from aiogram.filters import Command
+from aiogram.types import Message, CallbackQuery
+from loguru import logger
+
+from bot.telegram.keyboards.admin import (
+    admin_main_keyboard,
+    admin_stats_keyboard,
+    admin_users_keyboard,
+    admin_finance_keyboard,
+)
+from bot.telegram.keyboards.main import menu_keyboard
+from bot.database.repositories.user import UserRepository
+from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
+from bot.database.repositories.transferred_post import TransferredPostRepository
+from bot.database.repositories.yookassa_payment import YooKassaPaymentRepository
+from config.settings import settings
+
+# Create router
+admin_router = Router(name="admin")
+
+# Constants
+USERS_PER_PAGE = 10
+
+
+def is_admin(telegram_id: int) -> bool:
+    """
+    Check if user is admin.
+
+    Args:
+        telegram_id: Telegram user ID
+
+    Returns:
+        True if user is admin, False otherwise
+    """
+    return telegram_id == settings.admin_telegram_id
+
+
+# =============================================================================
+# Commands
+# =============================================================================
+
+
+@admin_router.message(Command("admin"))
+async def cmd_admin(
+    message: Message,
+    user_repo: UserRepository,
+) -> None:
+    """
+    Handle /admin command.
+
+    Shows admin panel for authorized users only.
+
+    Args:
+        message: Telegram message
+        user_repo: User repository from middleware
+    """
+    # Check admin rights
+    if not is_admin(message.from_user.id):
+        await message.answer(
+            "❌ У вас нет доступа к админ-панели.",
+            reply_markup=menu_keyboard(),
+        )
+        return
+
+    await message.answer(
+        "<b>👑 Админ-панель</b>\n\nВыберите раздел:",
+        parse_mode="HTML",
+        reply_markup=admin_main_keyboard(),
+    )
+
+
+# =============================================================================
+# Main Admin Menu Callbacks
+# =============================================================================
+
+
+@admin_router.callback_query(lambda c: c.data == "admin_main")
+async def callback_admin_main(callback: CallbackQuery) -> None:
+    """
+    Handle 'Back to admin main' callback.
+
+    Shows main admin menu.
+    """
+    # Check admin rights
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен", show_alert=True)
+        return
+
+    await callback.answer()
+    await callback.message.edit_text(
+        "<b>👑 Админ-панель</b>\n\nВыберите раздел:",
+        parse_mode="HTML",
+        reply_markup=admin_main_keyboard(),
+    )
+
+
+# =============================================================================
+# Statistics Callback
+# =============================================================================
+
+
+@admin_router.callback_query(lambda c: c.data == "admin_stats")
+async def callback_admin_stats(
+    callback: CallbackQuery,
+    user_repo: UserRepository,
+    autopost_sub_repo: AutopostSubscriptionRepository,
+    transferred_post_repo: TransferredPostRepository,
+) -> None:
+    """
+    Handle 'Statistics' callback.
+
+    Shows bot statistics.
+    """
+    # Check admin rights
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен", show_alert=True)
+        return
+
+    await callback.answer("⏳")
+
+    try:
+        # Get statistics
+        total_users = await user_repo.count_all()
+        active_subs = await autopost_sub_repo.count_active()
+
+        # Count posts transferred today
+        from datetime import datetime, timedelta
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # Get total transferred posts
+        total_posts = await transferred_post_repo.count()
+
+        # Note: transferred_post_repo doesn't have count_since method
+        # We'll use a simple query via the session
+        from sqlalchemy import select, func
+        from bot.database.models import TransferredPost
+
+        stmt = select(func.count(TransferredPost.id)).where(
+            TransferredPost.transferred_at >= today_start
+        )
+        result = await transferred_post_repo._session.execute(stmt)
+        posts_today = result.scalar() or 0
+
+        stats_text = (
+            f"<b>📊 Статистика бота</b>\n\n"
+            f"👥 Всего пользователей: {total_users}\n"
+            f"⚡ Активных подписок: {active_subs}\n"
+            f"📤 Постов перенесено сегодня: {posts_today}\n"
+            f"📤 Постов перенесено всего: {total_posts}"
+        )
+
+        await callback.message.edit_text(
+            stats_text,
+            parse_mode="HTML",
+            reply_markup=admin_stats_keyboard(),
+        )
+    except Exception as e:
+        logger.error(f"Error getting stats: {e}")
+        await callback.message.edit_text(
+            "❌ Ошибка при получении статистики",
+            reply_markup=admin_stats_keyboard(),
+        )
+
+
+# =============================================================================
+# Users Callback
+# =============================================================================
+
+
+@admin_router.callback_query(lambda c: c.data == "admin_users")
+async def callback_admin_users(
+    callback: CallbackQuery,
+    user_repo: UserRepository,
+    autopost_sub_repo: AutopostSubscriptionRepository,
+) -> None:
+    """
+    Handle 'Users' callback.
+
+    Shows paginated list of users.
+    """
+    # Check admin rights
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен", show_alert=True)
+        return
+
+    await callback.answer("⏳")
+    await _show_users_page(callback, user_repo, autopost_sub_repo, page=1)
+
+
+@admin_router.callback_query(lambda c: c.data and c.data.startswith("admin_users_page:"))
+async def callback_admin_users_page(
+    callback: CallbackQuery,
+    user_repo: UserRepository,
+    autopost_sub_repo: AutopostSubscriptionRepository,
+) -> None:
+    """
+    Handle users pagination callback.
+
+    Shows specific page of users list.
+    """
+    # Check admin rights
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен", show_alert=True)
+        return
+
+    # Parse page number
+    try:
+        page = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        page = 1
+
+    await callback.answer("⏳")
+    await _show_users_page(callback, user_repo, autopost_sub_repo, page=page)
+
+
+async def _show_users_page(
+    callback: CallbackQuery,
+    user_repo: UserRepository,
+    autopost_sub_repo: AutopostSubscriptionRepository,
+    page: int,
+) -> None:
+    """
+    Show users list for specific page.
+
+    Args:
+        callback: Telegram callback query
+        user_repo: User repository
+        autopost_sub_repo: Autopost subscription repository
+        page: Page number (1-based)
+    """
+    try:
+        # Get total count for pagination
+        total_users = await user_repo.count_all()
+        total_pages = (total_users + USERS_PER_PAGE - 1) // USERS_PER_PAGE
+
+        # Ensure valid page
+        if page < 1:
+            page = 1
+        if page > total_pages:
+            page = max(1, total_pages)
+
+        # Get users for current page
+        users = await user_repo.get_all_paginated(page=page, per_page=USERS_PER_PAGE)
+
+        # Build users list text
+        lines = ["<b>👥 Пользователи</b>\n"]
+
+        for user in users:
+            # Count user subscriptions
+            subs_count = await autopost_sub_repo.count_by_user(user.telegram_id)
+            balance = int(user.balance)
+            lines.append(
+                f"{user.telegram_id} | Баланс: {balance}₽ | Подписок: {subs_count}"
+            )
+
+        if not users:
+            lines.append("\n<i>Нет пользователей</i>")
+
+        users_text = "\n".join(lines)
+
+        await callback.message.edit_text(
+            users_text,
+            parse_mode="HTML",
+            reply_markup=admin_users_keyboard(page=page, total_pages=total_pages),
+        )
+    except Exception as e:
+        logger.error(f"Error getting users: {e}")
+        await callback.message.edit_text(
+            "❌ Ошибка при получении списка пользователей",
+            reply_markup=admin_users_keyboard(page=1, total_pages=1),
+        )
+
+
+# =============================================================================
+# Finance Callback
+# =============================================================================
+
+
+@admin_router.callback_query(lambda c: c.data == "admin_finance")
+async def callback_admin_finance(
+    callback: CallbackQuery,
+    yookassa_payment_repo,
+) -> None:
+    """
+    Handle 'Finances' callback.
+
+    Shows financial summary.
+    """
+    # Check admin rights
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен", show_alert=True)
+        return
+
+    await callback.answer("⏳")
+
+    try:
+        # Get financial statistics
+        total_income = await yookassa_payment_repo.sum_succeeded()
+        today_income = await yookassa_payment_repo.sum_by_period(days=1)
+        week_income = await yookassa_payment_repo.sum_by_period(days=7)
+        month_income = await yookassa_payment_repo.sum_by_period(days=30)
+        pending_count = await yookassa_payment_repo.count_pending()
+
+        finance_text = (
+            f"<b>💰 Финансовая сводка</b>\n\n"
+            f"💵 Общий доход: {int(total_income)}₽\n"
+            f"💵 Доход за сегодня: {int(today_income)}₽\n"
+            f"💵 Доход за 7 дней: {int(week_income)}₽\n"
+            f"💵 Доход за 30 дней: {int(month_income)}₽\n"
+            f"⏳ Pending платежей: {pending_count}"
+        )
+
+        await callback.message.edit_text(
+            finance_text,
+            parse_mode="HTML",
+            reply_markup=admin_finance_keyboard(),
+        )
+    except Exception as e:
+        logger.error(f"Error getting finance stats: {e}")
+        await callback.message.edit_text(
+            "❌ Ошибка при получении финансовой сводки",
+            reply_markup=admin_finance_keyboard(),
+        )
+
+
+# =============================================================================
+# Ignore Callback (for pagination placeholders)
+# =============================================================================
+
+
+@admin_router.callback_query(lambda c: c.data == "admin_ignore")
+async def callback_admin_ignore(callback: CallbackQuery) -> None:
+    """
+    Handle ignore callback (for disabled pagination buttons).
+    """
+    await callback.answer()

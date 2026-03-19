@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Callable
 
+from aiogram.types import InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from loguru import logger
 from telethon.tl.types import Message
 
@@ -14,6 +18,7 @@ from bot.core.transfer_engine import convert_entities_to_html
 from bot.max_api.client import MaxClient
 from bot.database.balance import get_balance, charge_autopost_with_subscription
 from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
+from bot.database.repositories.balance import UserBalanceRepository
 from bot.database.connection import get_session
 from config.settings import settings
 
@@ -49,6 +54,9 @@ class AutopostManager:
     # Album buffer wait time in seconds (time to collect all album parts)
     ALBUM_BUFFER_WAIT = 2
     
+    # Temp directory for downloads
+    TEMP_DIR = "/tmp/max_repost"
+
     def __init__(self, telethon_client, max_client: MaxClient, bot=None):
         """
         Initialize the autopost manager.
@@ -65,6 +73,87 @@ class AutopostManager:
         self.active_tasks: dict[str, dict] = {}
         # Album buffer: grouped_id -> {messages, timer_task, max_chat_id, user_id, tg_channel, subscription}
         self._album_buffer: dict[str, dict] = {}
+        
+        # Create temp directory for downloads
+        os.makedirs(self.TEMP_DIR, exist_ok=True)
+        
+        # Track last low balance notification time per user to prevent spam
+        self._low_balance_notified: dict[int, datetime] = {}
+    
+    async def _check_and_notify_low_balance(self, user_id: int) -> None:
+        """
+        Check user's balance and send low balance notifications if needed.
+        
+        To prevent spam, notifications are sent at most once per day per user.
+        
+        Args:
+            user_id: Telegram user ID
+        """
+        # Skip if bot instance is not available
+        if self.bot is None:
+            return
+        
+        # Check if already notified today
+        last_notify = self._low_balance_notified.get(user_id)
+        if last_notify and (datetime.now() - last_notify) < timedelta(days=1):
+            return  # Already notified today
+        
+        try:
+            async with get_session() as session:
+                balance_repo = UserBalanceRepository(session)
+                new_balance = await balance_repo.get_balance(user_id)
+            
+            # Convert Decimal to float for comparison
+            balance_float = float(new_balance)
+            
+            if balance_float <= 0:
+                # Zero balance - autoposting will be paused by other logic
+                message_text = (
+                    "🚫 Баланс: 0₽. Автопостинг приостановлен.\n"
+                    "Пополните баланс для возобновления."
+                )
+                
+                keyboard = self._get_deposit_keyboard()
+                
+                await self.bot.send_message(
+                    chat_id=user_id,
+                    text=message_text,
+                    reply_markup=keyboard,
+                )
+                
+                self._low_balance_notified[user_id] = datetime.now()
+                logger.info(f"Sent zero balance notification to user {user_id}")
+                
+            elif balance_float <= 10:
+                # Low balance warning (1-10₽)
+                estimated_posts = int(balance_float / 3)
+                
+                message_text = (
+                    f"⚠️ Ваш баланс: {int(balance_float)}₽\n"
+                    f"Осталось примерно {estimated_posts} постов.\n"
+                    "Пополните баланс, чтобы автопостинг не остановился."
+                )
+                
+                keyboard = self._get_deposit_keyboard()
+                
+                await self.bot.send_message(
+                    chat_id=user_id,
+                    text=message_text,
+                    reply_markup=keyboard,
+                )
+                
+                self._low_balance_notified[user_id] = datetime.now()
+                logger.info(f"Sent low balance notification to user {user_id} (balance: {balance_float}₽)")
+                
+        except Exception as e:
+            # Don't fail the post transfer if notification fails
+            logger.error(f"Failed to send low balance notification to user {user_id}: {e}")
+    
+    def _get_deposit_keyboard(self) -> InlineKeyboardMarkup:
+        """Get keyboard with deposit button for low balance notifications."""
+        builder = InlineKeyboardBuilder()
+        builder.button(text="💰 Пополнить", callback_data="balance_deposit")
+        return builder.as_markup()
     
     def _should_skip_autopost(self, message: Message) -> tuple[bool, str]:
         """Check if message should be skipped for autopost.
@@ -423,6 +512,9 @@ class AutopostManager:
                         await self._notify_insufficient_funds(user_id, tg_channel)
                         await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
                     return False
+                
+                # Check for low balance after successful charge
+                await self._check_and_notify_low_balance(user_id)
         
         # 4. Forward the album
         try:
@@ -534,57 +626,69 @@ class AutopostManager:
     
     async def _download_and_prepare_video(self, message: Message) -> dict | None:
         """Download and prepare a video attachment for sending."""
-        buf = io.BytesIO()
-        await message.download_media(file=buf)
-        buf.seek(0)
-        video_bytes = buf.read()
-        
-        if not video_bytes:
-            logger.warning(f"Empty video bytes for message {message.id}")
-            return None
-        
+        path = None
         try:
-            token = await self.max_client.upload_video(video_bytes)
+            # Download to temp file
+            path = await message.download_media(file=self.TEMP_DIR)
+            if not path:
+                logger.warning(f"Failed to download video for message {message.id}")
+                return None
+            
+            # Upload to Max
+            token = await self.max_client.upload_video(path)
+            logger.info(f"Prepared video from album: {path}")
             return {"type": "video", "payload": {"token": token}}
         except Exception as e:
             logger.error(f"Failed to upload video from message {message.id}: {e}")
             return None
+        finally:
+            if path and os.path.exists(path):
+                os.remove(path)
+                logger.debug(f"Cleaned up: {path}")
     
     async def _download_and_prepare_audio(self, message: Message) -> dict | None:
         """Download and prepare an audio/voice attachment for sending."""
-        buf = io.BytesIO()
-        await message.download_media(file=buf)
-        buf.seek(0)
-        audio_bytes = buf.read()
-        
-        if not audio_bytes:
-            logger.warning(f"Empty audio bytes for message {message.id}")
-            return None
-        
+        path = None
         try:
-            token = await self.max_client.upload_audio(audio_bytes)
+            # Download to temp file
+            path = await message.download_media(file=self.TEMP_DIR)
+            if not path:
+                logger.warning(f"Failed to download audio for message {message.id}")
+                return None
+            
+            # Upload to Max
+            token = await self.max_client.upload_audio(path)
+            logger.info(f"Prepared audio from album: {path}")
             return {"type": "audio", "payload": {"token": token}}
         except Exception as e:
             logger.error(f"Failed to upload audio from message {message.id}: {e}")
             return None
+        finally:
+            if path and os.path.exists(path):
+                os.remove(path)
+                logger.debug(f"Cleaned up: {path}")
     
     async def _download_and_prepare_document(self, message: Message) -> dict | None:
         """Download and prepare a document/file attachment for sending."""
-        buf = io.BytesIO()
-        await message.download_media(file=buf)
-        buf.seek(0)
-        file_bytes = buf.read()
-        
-        if not file_bytes:
-            logger.warning(f"Empty file bytes for message {message.id}")
-            return None
-        
+        path = None
         try:
-            token = await self.max_client.upload_file(file_bytes)
+            # Download to temp file
+            path = await message.download_media(file=self.TEMP_DIR)
+            if not path:
+                logger.warning(f"Failed to download document for message {message.id}")
+                return None
+            
+            # Upload to Max
+            token = await self.max_client.upload_file(path)
+            logger.info(f"Prepared document from album: {path}")
             return {"type": "file", "payload": {"token": token}}
         except Exception as e:
             logger.error(f"Failed to upload file from message {message.id}: {e}")
             return None
+        finally:
+            if path and os.path.exists(path):
+                os.remove(path)
+                logger.debug(f"Cleaned up: {path}")
     
     async def _update_last_post_id(self, subscription_id: int, post_id: int) -> None:
         """Update last_post_id in database."""
@@ -714,6 +818,9 @@ class AutopostManager:
                                 for album_msg in album_messages:
                                     new_last_post_id = album_msg.id
                                 return new_last_post_id
+                            
+                            # Check for low balance after successful charge
+                            await self._check_and_notify_low_balance(user_id)
                     
                     # Forward the album
                     try:
@@ -761,6 +868,9 @@ class AutopostManager:
                                 await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
                             logger.warning(f"Catch-up: failed to charge for message {message.id}, stopping")
                             return new_last_post_id
+                        
+                        # Check for low balance after successful charge
+                        await self._check_and_notify_low_balance(user_id)
                 
                 # Forward the post
                 try:
@@ -900,6 +1010,9 @@ class AutopostManager:
                         await self._notify_insufficient_funds(user_id, tg_channel)
                         await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
                     return False
+                
+                # Check for low balance after successful charge
+                await self._check_and_notify_low_balance(user_id)
         
         # 4. Forward the post
         try:
@@ -996,23 +1109,22 @@ class AutopostManager:
         format_type: str | None,
     ) -> None:
         """Forward a video post."""
-        buf = io.BytesIO()
-        await message.download_media(file=buf)
-        buf.seek(0)
-        video_bytes = buf.read()
-        
-        if not video_bytes:
-            logger.warning(f"Empty video bytes for message {message.id}")
-            if text:
-                await self.max_client.send_message(
-                    chat_id=max_chat_id,
-                    text=text,
-                    format=format_type,
-                )
-            return
-        
+        path = None
         try:
-            token = await self.max_client.upload_video(video_bytes)
+            # Download to temp file
+            path = await message.download_media(file=self.TEMP_DIR)
+            if not path:
+                logger.warning(f"Failed to download video for message {message.id}")
+                if text:
+                    await self.max_client.send_message(
+                        chat_id=max_chat_id,
+                        text=text,
+                        format=format_type,
+                    )
+                return
+            
+            # Upload to Max
+            token = await self.max_client.upload_video(path)
             attachment = {"type": "video", "payload": {"token": token}}
             
             await self.max_client.send_message(
@@ -1021,6 +1133,7 @@ class AutopostManager:
                 attachments=[attachment],
                 format=format_type,
             )
+            logger.info(f"Sent video to Max: {path}")
         except Exception as e:
             logger.error(f"Failed to upload/forward video: {e}")
             if text:
@@ -1029,6 +1142,10 @@ class AutopostManager:
                     text=text,
                     format=format_type,
                 )
+        finally:
+            if path and os.path.exists(path):
+                os.remove(path)
+                logger.debug(f"Cleaned up: {path}")
     
     async def _forward_audio(
         self,
@@ -1038,23 +1155,22 @@ class AutopostManager:
         format_type: str | None,
     ) -> None:
         """Forward an audio/voice post."""
-        buf = io.BytesIO()
-        await message.download_media(file=buf)
-        buf.seek(0)
-        audio_bytes = buf.read()
-        
-        if not audio_bytes:
-            logger.warning(f"Empty audio bytes for message {message.id}")
-            if text:
-                await self.max_client.send_message(
-                    chat_id=max_chat_id,
-                    text=text,
-                    format=format_type,
-                )
-            return
-        
+        path = None
         try:
-            token = await self.max_client.upload_audio(audio_bytes)
+            # Download to temp file
+            path = await message.download_media(file=self.TEMP_DIR)
+            if not path:
+                logger.warning(f"Failed to download audio for message {message.id}")
+                if text:
+                    await self.max_client.send_message(
+                        chat_id=max_chat_id,
+                        text=text,
+                        format=format_type,
+                    )
+                return
+            
+            # Upload to Max
+            token = await self.max_client.upload_audio(path)
             attachment = {"type": "audio", "payload": {"token": token}}
             
             await self.max_client.send_message(
@@ -1063,6 +1179,7 @@ class AutopostManager:
                 attachments=[attachment],
                 format=format_type,
             )
+            logger.info(f"Sent audio to Max: {path}")
         except Exception as e:
             logger.error(f"Failed to upload/forward audio: {e}")
             if text:
@@ -1071,6 +1188,10 @@ class AutopostManager:
                     text=text,
                     format=format_type,
                 )
+        finally:
+            if path and os.path.exists(path):
+                os.remove(path)
+                logger.debug(f"Cleaned up: {path}")
     
     async def _forward_document(
         self,
@@ -1080,23 +1201,22 @@ class AutopostManager:
         format_type: str | None,
     ) -> None:
         """Forward a document/file post."""
-        buf = io.BytesIO()
-        await message.download_media(file=buf)
-        buf.seek(0)
-        file_bytes = buf.read()
-        
-        if not file_bytes:
-            logger.warning(f"Empty file bytes for message {message.id}")
-            if text:
-                await self.max_client.send_message(
-                    chat_id=max_chat_id,
-                    text=text,
-                    format=format_type,
-                )
-            return
-        
+        path = None
         try:
-            token = await self.max_client.upload_file(file_bytes)
+            # Download to temp file
+            path = await message.download_media(file=self.TEMP_DIR)
+            if not path:
+                logger.warning(f"Failed to download document for message {message.id}")
+                if text:
+                    await self.max_client.send_message(
+                        chat_id=max_chat_id,
+                        text=text,
+                        format=format_type,
+                    )
+                return
+            
+            # Upload to Max
+            token = await self.max_client.upload_file(path)
             attachment = {"type": "file", "payload": {"token": token}}
             
             await self.max_client.send_message(
@@ -1105,6 +1225,7 @@ class AutopostManager:
                 attachments=[attachment],
                 format=format_type,
             )
+            logger.info(f"Sent document to Max: {path}")
         except Exception as e:
             logger.error(f"Failed to upload/forward file: {e}")
             if text:
@@ -1113,6 +1234,10 @@ class AutopostManager:
                     text=text,
                     format=format_type,
                 )
+        finally:
+            if path and os.path.exists(path):
+                os.remove(path)
+                logger.debug(f"Cleaned up: {path}")
     
     async def _notify_insufficient_funds(self, user_id: int, channel: str) -> None:
         """

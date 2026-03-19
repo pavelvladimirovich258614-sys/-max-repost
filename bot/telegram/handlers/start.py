@@ -1,8 +1,9 @@
 """Start router with /start, /menu, /help handlers and navigation callbacks."""
 
 import asyncio
+from decimal import Decimal
 
-from aiogram import Router
+from aiogram import Router, Bot
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from loguru import logger
@@ -13,9 +14,12 @@ from bot.telegram.keyboards.main import (
     back_to_menu_keyboard,
     balance_keyboard,
 )
-from bot.database.repositories.balance import UserBalanceRepository
+from bot.database.repositories.balance import UserBalanceRepository, BalanceTransactionRepository
 from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
 from config.settings import settings
+
+# Referral bonus amount in rubles
+REFERRAL_BONUS = Decimal("10.00")
 
 # Create router
 start_router = Router(name="start")
@@ -94,19 +98,48 @@ HELP_MESSAGE = INSTRUCTION_MESSAGE
 
 
 @start_router.message(Command("start"))
-async def cmd_start(message: Message, user_repo) -> None:
+async def cmd_start(
+    message: Message,
+    user_repo,
+    balance_repo: UserBalanceRepository,
+    transaction_repo: BalanceTransactionRepository,
+    bot: Bot,
+) -> None:
     """
     Handle /start command.
 
     Register user if new, send welcome sticker and message with start keyboard.
     First-time users see the welcome with 3 main actions.
+    
+    Also handles referral codes via deep linking: /start ref_ABC12345
 
     Args:
         message: Telegram message
         user_repo: User repository from middleware
+        balance_repo: Balance repository for referral bonuses
+        transaction_repo: Transaction repository for recording bonuses
+        bot: Bot instance for sending notifications
     """
+    # Get command arguments (referral code)
+    command_args = message.text.split() if message.text else []
+    referral_code = None
+    
+    if len(command_args) > 1 and command_args[1].startswith("ref_"):
+        referral_code = command_args[1][4:]  # Remove "ref_" prefix
+    
     # Register user (get or create)
-    user, _ = await user_repo.get_or_create(message.from_user.id)
+    user, is_new = await user_repo.get_or_create(message.from_user.id)
+    
+    # Handle referral if new user and valid referral code
+    if is_new and referral_code:
+        await _process_referral(
+            user, 
+            referral_code, 
+            user_repo, 
+            balance_repo, 
+            transaction_repo, 
+            bot
+        )
     
     # Get user's first name
     first_name = message.from_user.first_name or "друг"
@@ -123,6 +156,95 @@ async def cmd_start(message: Message, user_repo) -> None:
         parse_mode="HTML",
         reply_markup=start_keyboard(),
     )
+
+
+async def _process_referral(
+    new_user,
+    referral_code: str,
+    user_repo,
+    balance_repo: UserBalanceRepository,
+    transaction_repo: BalanceTransactionRepository,
+    bot: Bot,
+) -> None:
+    """
+    Process referral registration.
+    
+    Args:
+        new_user: The newly registered user
+        referral_code: Referral code from the start command
+        user_repo: User repository
+        balance_repo: Balance repository
+        transaction_repo: Transaction repository
+        bot: Bot instance
+    """
+    try:
+        # Find referrer by code
+        referrer = await user_repo.get_by_referral_code(referral_code)
+        
+        if referrer is None:
+            logger.info(f"Invalid referral code: {referral_code}")
+            return
+        
+        # Check: cannot refer yourself
+        if referrer.telegram_id == new_user.telegram_id:
+            logger.info(f"User {new_user.telegram_id} tried to refer themselves")
+            return
+        
+        # Check: referred_by can only be set once
+        if new_user.referred_by is not None:
+            logger.info(f"User {new_user.telegram_id} already has a referrer")
+            return
+        
+        # Set referred_by
+        updated_user = await user_repo.set_referred_by(new_user.id, referrer.telegram_id)
+        if updated_user is None:
+            logger.warning(f"Could not set referrer for user {new_user.telegram_id}")
+            return
+        
+        # Award bonus to new user
+        new_user_balance, _ = await balance_repo.get_or_create(new_user.telegram_id)
+        await balance_repo.update_balance(
+            new_user.telegram_id,
+            REFERRAL_BONUS,
+            is_deposit=True,
+        )
+        await transaction_repo.create_transaction(
+            user_id=new_user.telegram_id,
+            amount=REFERRAL_BONUS,
+            transaction_type="referral_bonus",
+            description=f"Бонус за регистрацию по реферальной ссылке",
+        )
+        
+        # Award bonus to referrer
+        referrer_balance, _ = await balance_repo.get_or_create(referrer.telegram_id)
+        await balance_repo.update_balance(
+            referrer.telegram_id,
+            REFERRAL_BONUS,
+            is_deposit=True,
+        )
+        await transaction_repo.create_transaction(
+            user_id=referrer.telegram_id,
+            amount=REFERRAL_BONUS,
+            transaction_type="referral_bonus",
+            description=f"Бонус за приглашение пользователя #{new_user.telegram_id}",
+        )
+        
+        # Notify referrer
+        try:
+            await bot.send_message(
+                referrer.telegram_id,
+                "🎉 По вашей ссылке зарегистрировался новый пользователь! +10₽",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning(f"Could not notify referrer {referrer.telegram_id}: {e}")
+        
+        logger.info(
+            f"Referral processed: {new_user.telegram_id} referred by {referrer.telegram_id}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing referral: {e}")
 
 
 @start_router.message(Command("menu"))
@@ -204,7 +326,7 @@ async def cmd_menu(
     await message.answer(
         menu_text,
         parse_mode="HTML",
-        reply_markup=menu_keyboard(),
+        reply_markup=menu_keyboard(is_admin=is_admin),
     )
 
 
@@ -316,6 +438,59 @@ async def callback_help(callback: CallbackQuery) -> None:
     )
 
 
+@start_router.callback_query(lambda c: c.data == "menu_referral")
+async def callback_referral(
+    callback: CallbackQuery,
+    user_repo,
+    balance_repo: UserBalanceRepository,
+    transaction_repo: BalanceTransactionRepository,
+) -> None:
+    """
+    Handle 'Invite friend' button - show referral info.
+    
+    Displays referral link, invited count, and earned amount.
+    """
+    # Answer callback FIRST before any async operations
+    await callback.answer("⏳")
+    
+    user = await user_repo.get_by_telegram_id(callback.from_user.id)
+    
+    if user is None or user.referral_code is None:
+        # Generate code if missing
+        if user is not None:
+            referral_code = await user_repo._generate_unique_referral_code()
+            await user_repo.set_referral_code(user.id, referral_code)
+            user.referral_code = referral_code
+        else:
+            await callback.message.edit_text(
+                "Ошибка загрузки данных пользователя.",
+                reply_markup=back_to_menu_keyboard(),
+            )
+            return
+    
+    # Get referral stats
+    referral_count = await user_repo.count_referrals(callback.from_user.id)
+    referral_earnings = await transaction_repo.get_referral_earnings(callback.from_user.id)
+    
+    # Build referral text
+    referral_link = f"https://t.me/{TG_BOT_USERNAME}?start=ref_{user.referral_code}"
+    
+    referral_text = (
+        f"<b>👥 Пригласить друга</b>\n\n"
+        f"<b>Ваша реферальная ссылка:</b>\n"
+        f"<code>{referral_link}</code>\n\n"
+        f"Приглашено: {referral_count} чел.\n"
+        f"Заработано: {int(referral_earnings)}₽\n\n"
+        f"<i>За каждого приглашённого друга вы получаете +10₽, друг тоже получает +10₽!</i>"
+    )
+    
+    await callback.message.edit_text(
+        referral_text,
+        parse_mode="HTML",
+        reply_markup=back_to_menu_keyboard(),
+    )
+
+
 # =============================================================================
 # Navigation Callbacks
 # =============================================================================
@@ -387,5 +562,5 @@ async def callback_goto_menu(
     await callback.message.edit_text(
         menu_text,
         parse_mode="HTML",
-        reply_markup=menu_keyboard(),
+        reply_markup=menu_keyboard(is_admin=is_admin),
     )

@@ -25,14 +25,18 @@ def start_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def menu_keyboard() -> InlineKeyboardMarkup:
+def menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     """
     Create main menu keyboard.
 
     Full menu for returning users with all options.
+    Admin users see additional admin panel button.
+
+    Args:
+        is_admin: Whether to show admin button
 
     Returns:
-        Inline keyboard with 5 buttons
+        Inline keyboard with menu buttons
     """
     builder = InlineKeyboardBuilder()
 
@@ -40,9 +44,15 @@ def menu_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="⚡ Автопостинг", callback_data="menu_manage_autopost")
     builder.button(text="💰 Баланс", callback_data="menu_balance")
     builder.button(text="📢 Мои каналы", callback_data="menu_my_channels")
+    builder.button(text="👥 Пригласить друга", callback_data="menu_referral")
     builder.button(text="❓ Инструкция", callback_data="menu_help")
 
-    builder.adjust(1)
+    if is_admin:
+        builder.button(text="👑 Админ-панель", callback_data="admin_main")
+        builder.adjust(1, 1, 2, 1, 1, 1)
+    else:
+        builder.adjust(1)
+
     return builder.as_markup()
 
 
