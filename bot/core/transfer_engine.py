@@ -11,6 +11,7 @@ This module handles the complete transfer workflow:
 import asyncio
 import html
 import io
+import os
 import tempfile
 import time
 from dataclasses import dataclass, field
