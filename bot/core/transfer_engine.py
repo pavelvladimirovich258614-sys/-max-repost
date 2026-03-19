@@ -1042,12 +1042,16 @@ class TransferEngine:
             first_chunk = text_chunks[0] if text_chunks else ""
             attachment = {"type": "video", "payload": {"token": token}}
             
-            await self._send_with_retry(
+            result = await self._send_with_retry(
                 chat_id=max_channel_id,
                 text=first_chunk,
                 attachment=attachment,
                 format_type="html",
             )
+            # Check result to avoid 'NoneType' object has no attribute 'get'
+            if not result:
+                logger.error(f"Send returned None for video {message.id}")
+                raise MaxAPIError(f"Failed to send video {message.id}: send_message returned None")
             logger.info(f"Successfully sent video message {message.id}")
             
             # Send remaining text chunks
@@ -1135,12 +1139,16 @@ class TransferEngine:
                 first_chunk = text_chunks[0] if text_chunks else ""
                 attachment = {"type": "audio", "payload": {"token": token}}
 
-                await self._send_with_retry(
+                result = await self._send_with_retry(
                     chat_id=max_channel_id,
                     text=first_chunk,
                     attachment=attachment,
                     format_type="html",
                 )
+                # Check result to avoid 'NoneType' object has no attribute 'get'
+                if not result:
+                    logger.error(f"Send returned None for audio {message.id}")
+                    raise MaxAPIError(f"Failed to send audio {message.id}: send_message returned None")
                 logger.info(f"Successfully sent audio message {message.id}")
             except Exception as e:
                 logger.error(f"Send failed for audio {message.id}: {e}", exc_info=True)
@@ -1221,12 +1229,16 @@ class TransferEngine:
             first_chunk = text_chunks[0] if text_chunks else ""
             attachment = {"type": "file", "payload": {"token": token}}
             
-            await self._send_with_retry(
+            result = await self._send_with_retry(
                 chat_id=max_channel_id,
                 text=first_chunk,
                 attachment=attachment,
                 format_type="html",
             )
+            # Check result to avoid 'NoneType' object has no attribute 'get'
+            if not result:
+                logger.error(f"Send returned None for file {message.id}")
+                raise MaxAPIError(f"Failed to send file {message.id}: send_message returned None")
             logger.info(f"Successfully sent file message {message.id}")
             
             # Send remaining text chunks
@@ -1297,7 +1309,7 @@ class TransferEngine:
         attachment: dict,
         format_type: str = "html",
         max_retries: int = 8,
-    ) -> None:
+    ) -> dict | None:
         """
         Send message with attachment, retrying on attachment.not.ready error.
         
@@ -1310,7 +1322,11 @@ class TransferEngine:
             attachment: Attachment dict with type and payload
             format_type: Text format (html or None)
             max_retries: Maximum number of retry attempts (default 8 = 180s total)
+        
+        Returns:
+            Response dict from send_message or None if failed
         """
+        last_error = None
         for attempt in range(max_retries):
             try:
                 result = await self.max_client.send_message(
@@ -1319,10 +1335,22 @@ class TransferEngine:
                     attachments=[attachment],
                     format=format_type,
                 )
+                # Check for None result to avoid 'NoneType' object has no attribute 'get'
+                if result is None:
+                    logger.warning(f"send_message returned None (attempt {attempt + 1}/{max_retries})")
+                    if attempt < max_retries - 1:
+                        wait = 5 * (attempt + 1)
+                        logger.info(f"Retrying after {wait}s...")
+                        await asyncio.sleep(wait)
+                        continue
+                    else:
+                        raise MaxAPIError("send_message returned None after all retries")
+                
                 if attempt > 0:
                     logger.info(f"Message sent successfully after {attempt + 1} attempts")
-                return
-            except AttachmentNotReadyError:
+                return result
+            except AttachmentNotReadyError as e:
+                last_error = e
                 if attempt < max_retries - 1:
                     wait = 5 * (attempt + 1)  # 5, 10, 15, 20, 25, 30, 35, 40 seconds
                     logger.info(f"Attachment not ready, waiting {wait}s... (attempt {attempt + 1}/{max_retries})")
@@ -1330,9 +1358,16 @@ class TransferEngine:
                 else:
                     logger.error(f"Attachment not ready after {max_retries} attempts, giving up")
                     raise
-            except Exception:
+            except Exception as e:
+                # Log the error for debugging
+                logger.error(f"Send error on attempt {attempt + 1}: {type(e).__name__}: {e}")
                 # Other errors - don't retry
                 raise
+        
+        # Should not reach here, but just in case
+        if last_error:
+            raise last_error
+        return None
 
     async def _notify_progress(
         self,
