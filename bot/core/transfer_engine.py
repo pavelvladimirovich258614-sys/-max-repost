@@ -51,7 +51,7 @@ from telethon.tl.types import (
     DocumentAttributeSticker,
 )
 
-from bot.max_api.client import MaxClient, MaxAPIError, RateLimitError
+from bot.max_api.client import MaxClient, MaxAPIError, RateLimitError, AttachmentNotReadyError
 from bot.database.repositories.transferred_post import TransferredPostRepository
 
 
@@ -1042,11 +1042,11 @@ class TransferEngine:
             first_chunk = text_chunks[0] if text_chunks else ""
             attachment = {"type": "video", "payload": {"token": token}}
             
-            await self.max_client.send_message(
+            await self._send_with_retry(
                 chat_id=max_channel_id,
                 text=first_chunk,
-                attachments=[attachment],
-                format="html",
+                attachment=attachment,
+                format_type="html",
             )
             logger.info(f"Successfully sent video message {message.id}")
             
@@ -1135,11 +1135,11 @@ class TransferEngine:
                 first_chunk = text_chunks[0] if text_chunks else ""
                 attachment = {"type": "audio", "payload": {"token": token}}
 
-                await self.max_client.send_message(
+                await self._send_with_retry(
                     chat_id=max_channel_id,
                     text=first_chunk,
-                    attachments=[attachment],
-                    format="html",
+                    attachment=attachment,
+                    format_type="html",
                 )
                 logger.info(f"Successfully sent audio message {message.id}")
             except Exception as e:
@@ -1221,11 +1221,11 @@ class TransferEngine:
             first_chunk = text_chunks[0] if text_chunks else ""
             attachment = {"type": "file", "payload": {"token": token}}
             
-            await self.max_client.send_message(
+            await self._send_with_retry(
                 chat_id=max_channel_id,
                 text=first_chunk,
-                attachments=[attachment],
-                format="html",
+                attachment=attachment,
+                format_type="html",
             )
             logger.info(f"Successfully sent file message {message.id}")
             
@@ -1289,6 +1289,50 @@ class TransferEngine:
         # 2. Downloading all media files
         # 3. Uploading all to Max
         # 4. Sending as a single message with multiple attachments
+
+    async def _send_with_retry(
+        self,
+        chat_id: str | int,
+        text: str,
+        attachment: dict,
+        format_type: str = "html",
+        max_retries: int = 8,
+    ) -> None:
+        """
+        Send message with attachment, retrying on attachment.not.ready error.
+        
+        Max API needs time to process uploaded files (up to 60s for large files).
+        Retries with linear backoff: 5, 10, 15, 20, 25, 30, 35, 40 seconds.
+        
+        Args:
+            chat_id: Target chat ID
+            text: Message text
+            attachment: Attachment dict with type and payload
+            format_type: Text format (html or None)
+            max_retries: Maximum number of retry attempts (default 8 = 180s total)
+        """
+        for attempt in range(max_retries):
+            try:
+                result = await self.max_client.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    attachments=[attachment],
+                    format=format_type,
+                )
+                if attempt > 0:
+                    logger.info(f"Message sent successfully after {attempt + 1} attempts")
+                return
+            except AttachmentNotReadyError:
+                if attempt < max_retries - 1:
+                    wait = 5 * (attempt + 1)  # 5, 10, 15, 20, 25, 30, 35, 40 seconds
+                    logger.info(f"Attachment not ready, waiting {wait}s... (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(f"Attachment not ready after {max_retries} attempts, giving up")
+                    raise
+            except Exception:
+                # Other errors - don't retry
+                raise
 
     async def _notify_progress(
         self,
