@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     telegram_api_hash: str = Field(..., alias="TELEGRAM_API_HASH")
     telegram_phone: str = Field(..., alias="TELEGRAM_PHONE")
 
+    # Telethon Session (StringSession format - export from SQLite using scripts/export_session.py)
+    telethon_session_string: str = Field(default="", alias="TELETHON_SESSION_STRING")
+
     # Max API (vk.com)
     max_access_token: str = Field(..., alias="MAX_ACCESS_TOKEN")
 

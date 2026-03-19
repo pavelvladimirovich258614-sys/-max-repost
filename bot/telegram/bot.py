@@ -72,6 +72,7 @@ def setup_dispatcher(bot: Bot) -> Dispatcher:
             api_id=settings.telegram_api_id,
             api_hash=settings.telegram_api_hash,
             phone=settings.telegram_phone,
+            session_string=settings.telethon_session_string,
         )
         max_client = MaxClient()
         autopost_manager = AutopostManager(telethon, max_client)

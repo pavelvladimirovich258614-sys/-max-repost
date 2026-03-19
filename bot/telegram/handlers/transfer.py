@@ -485,6 +485,7 @@ async def select_verified_channel(
                 api_id=settings.telegram_api_id,
                 api_hash=settings.telegram_api_hash,
                 phone=settings.telegram_phone,
+                session_string=settings.telethon_session_string,
             )
             
             # Try by channel_id first (for private channels), then by username
@@ -609,6 +610,7 @@ async def process_transfer_tg_channel(
                 api_id=settings.telegram_api_id,
                 api_hash=settings.telegram_api_hash,
                 phone=settings.telegram_phone,
+                session_string=settings.telethon_session_string,
             )
             # Get entity via Telethon
             entity = await telethon.get_entity(channel_username)
@@ -918,6 +920,34 @@ async def check_verification_code(
     code = data.get("verification_code")
     tg_channel = data.get("transfer_tg_channel_username")
     channel_title = data.get("transfer_tg_channel_title", "Канал")
+    tg_channel_id = data.get("transfer_tg_channel_id")
+    
+    # ADMIN BYPASS: Skip verification for admin
+    if callback.from_user.id == settings.admin_telegram_id:
+        logger.info(f"Admin bypass for channel verification: {tg_channel}")
+        
+        # Save channel as verified for admin
+        if verified_channel_repo:
+            try:
+                await verified_channel_repo.verify_channel(
+                    user_id=callback.from_user.id,
+                    tg_channel=tg_channel,
+                    tg_channel_id=tg_channel_id,
+                )
+                logger.info(f"Channel {tg_channel} auto-verified for admin")
+            except Exception as e:
+                logger.error(f"Failed to save verified channel for admin: {e}")
+        
+        try:
+            await callback.answer("✅ Канал подтверждён (админ)", show_alert=True)
+        except Exception:
+            pass
+        
+        # Proceed to Max channel selection
+        await _show_max_connection_instructions(
+            callback.message, state, channel_title, db_session, user_repo=None
+        )
+        return
     
     if not code or not tg_channel:
         builder = InlineKeyboardBuilder()
@@ -935,10 +965,15 @@ async def check_verification_code(
             api_id=settings.telegram_api_id,
             api_hash=settings.telegram_api_hash,
             phone=settings.telegram_phone,
+            session_string=settings.telethon_session_string,
         )
         
         # Verify code in channel description
-        is_verified = await verify_channel_ownership(telethon, tg_channel, code)
+        is_verified = await verify_channel_ownership(
+            telethon, tg_channel, code, 
+            bot=callback.bot if hasattr(callback, 'bot') else None,
+            channel_id=tg_channel_id
+        )
         
         if is_verified:
             await callback.answer("✅ Права подтверждены!", show_alert=True)

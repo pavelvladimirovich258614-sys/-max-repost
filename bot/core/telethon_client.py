@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.errors import SessionPasswordNeededError
@@ -48,7 +49,7 @@ class TelethonChannelClient:
     Session is saved to file after first authorization via scripts/auth_telethon.py
     """
 
-    def __init__(self, api_id: int, api_hash: str, phone: str):
+    def __init__(self, api_id: int, api_hash: str, phone: str, session_string: str = ""):
         """
         Initialize Telethon client with user credentials.
 
@@ -56,10 +57,12 @@ class TelethonChannelClient:
             api_id: Telegram API ID from https://my.telegram.org
             api_hash: Telegram API Hash from https://my.telegram.org
             phone: Phone number for user session (e.g., +7XXXXXXXXXX)
+            session_string: StringSession string (exported via scripts/export_session.py)
         """
         self.api_id = api_id
         self.api_hash = api_hash
         self.phone = phone
+        self.session_string = session_string
         self._client: Optional[TelegramClient] = None
         self._session_path = Path(SESSION_FILE + ".session")
         self._keepalive_task: Optional[asyncio.Task] = None
@@ -80,20 +83,28 @@ class TelethonChannelClient:
             RuntimeError: If session file doesn't exist (needs auth via script)
         """
         if self._client is None:
-            # Check if session file exists
-            if not self._is_session_exists():
-                logger.error(
-                    f"Telethon session file not found: {self._session_path}\n"
-                    f"Run 'python scripts/auth_telethon.py' to authorize."
-                )
-                raise RuntimeError(
-                    "No Telethon session found. "
-                    "Run 'python scripts/auth_telethon.py' to authorize."
-                )
+            # Use StringSession if provided, otherwise fallback to SQLite file
+            if self.session_string:
+                logger.info("Using StringSession (in-memory) for Telethon")
+                session = StringSession(self.session_string)
+            else:
+                # Fallback to SQLite session file
+                if not self._is_session_exists():
+                    logger.error(
+                        f"Telethon session file not found: {self._session_path}\n"
+                        f"Run 'python scripts/export_session.py' to export existing session, OR\n"
+                        f"Run 'python scripts/auth_telethon.py' to authorize."
+                    )
+                    raise RuntimeError(
+                        "No Telethon session found. "
+                        "Run 'python scripts/export_session.py' to export, OR "
+                        "'python scripts/auth_telethon.py' to authorize."
+                    )
+                logger.info("Using SQLite session file for Telethon (legacy)")
+                session = SESSION_FILE
 
-            # Create client with existing session file
             self._client = TelegramClient(
-                session=SESSION_FILE,
+                session=session,
                 api_id=self.api_id,
                 api_hash=self.api_hash,
             )
@@ -376,7 +387,7 @@ class TelethonChannelClient:
 _client_instance: Optional[TelethonChannelClient] = None
 
 
-def get_telethon_client(api_id: int, api_hash: str, phone: str) -> TelethonChannelClient:
+def get_telethon_client(api_id: int, api_hash: str, phone: str, session_string: str = "") -> TelethonChannelClient:
     """
     Get singleton Telethon client instance.
 
@@ -384,11 +395,13 @@ def get_telethon_client(api_id: int, api_hash: str, phone: str) -> TelethonChann
         api_id: Telegram API ID
         api_hash: Telegram API Hash
         phone: Phone number for user session
+        session_string: StringSession string (exported via scripts/export_session.py)
 
     Returns:
         TelethonChannelClient instance
     """
     global _client_instance
+    # Pass session_string to constructor
     if _client_instance is None:
-        _client_instance = TelethonChannelClient(api_id, api_hash, phone)
+        _client_instance = TelethonChannelClient(api_id, api_hash, phone, session_string)
     return _client_instance

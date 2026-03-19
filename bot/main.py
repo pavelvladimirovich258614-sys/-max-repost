@@ -206,6 +206,7 @@ async def main() -> None:
         api_id=settings.telegram_api_id,
         api_hash=settings.telegram_api_hash,
         phone=settings.telegram_phone,
+        session_string=settings.telethon_session_string,
     )
     
     # Initialize and start the Telethon client
