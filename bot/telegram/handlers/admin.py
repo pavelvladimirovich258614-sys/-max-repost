@@ -1,6 +1,7 @@
 """Admin panel handlers."""
 
 from aiogram import Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from loguru import logger
@@ -84,12 +85,16 @@ async def callback_admin_main(callback: CallbackQuery) -> None:
 
     Shows main admin menu.
     """
+    # Answer callback immediately to prevent timeout
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
     # Check admin rights
     if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещен", show_alert=True)
         return
 
-    await callback.answer()
     await callback.message.edit_text(
         "<b>👑 Админ-панель</b>\n\nВыберите раздел:",
         parse_mode="HTML",
@@ -119,7 +124,11 @@ async def callback_admin_stats(
         await callback.answer("❌ Доступ запрещен", show_alert=True)
         return
 
-    await callback.answer("⏳")
+    # Answer callback immediately with loading indicator
+    try:
+        await callback.answer("⏳")
+    except TelegramBadRequest:
+        pass
 
     try:
         # Get statistics
@@ -186,7 +195,11 @@ async def callback_admin_users(
         await callback.answer("❌ Доступ запрещен", show_alert=True)
         return
 
-    await callback.answer("⏳")
+    # Answer callback immediately with loading indicator
+    try:
+        await callback.answer("⏳")
+    except TelegramBadRequest:
+        pass
     await _show_users_page(callback, user_repo, autopost_sub_repo, page=1)
 
 
@@ -201,9 +214,14 @@ async def callback_admin_users_page(
 
     Shows specific page of users list.
     """
+    # Answer callback immediately with loading indicator
+    try:
+        await callback.answer("⏳")
+    except TelegramBadRequest:
+        pass
+
     # Check admin rights
     if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещен", show_alert=True)
         return
 
     # Parse page number
@@ -211,8 +229,6 @@ async def callback_admin_users_page(
         page = int(callback.data.split(":")[1])
     except (IndexError, ValueError):
         page = 1
-
-    await callback.answer("⏳")
     await _show_users_page(callback, user_repo, autopost_sub_repo, page=page)
 
 
@@ -294,7 +310,11 @@ async def callback_admin_finance(
         await callback.answer("❌ Доступ запрещен", show_alert=True)
         return
 
-    await callback.answer("⏳")
+    # Answer callback immediately with loading indicator
+    try:
+        await callback.answer("⏳")
+    except TelegramBadRequest:
+        pass
 
     try:
         # Get financial statistics
@@ -336,4 +356,8 @@ async def callback_admin_ignore(callback: CallbackQuery) -> None:
     """
     Handle ignore callback (for disabled pagination buttons).
     """
-    await callback.answer()
+    # Answer callback immediately to prevent timeout
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass

@@ -1,6 +1,7 @@
 """Auto-posting handler - managing TG -> Max autopost subscriptions."""
 
 from aiogram import Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
@@ -203,9 +204,15 @@ async def toggle_autopost_handler(
     autopost_sub_repo,
 ) -> None:
     """Toggle autopost subscription active status (pause/resume)."""
+    # Answer callback immediately to prevent timeout
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
     user_id = callback.from_user.id
     subscription_id = int(callback.data.split(":", 1)[1])
-    
+
     try:
         # Get subscription before toggle
         sub = await autopost_sub_repo.get_by_id_and_user(subscription_id, user_id)
@@ -244,9 +251,15 @@ async def delete_autopost_confirm(
     autopost_sub_repo,
 ) -> None:
     """Show confirmation for deleting autopost subscription."""
+    # Answer callback immediately to prevent timeout
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
     user_id = callback.from_user.id
     subscription_id = int(callback.data.split(":", 1)[1])
-    
+
     try:
         sub = await autopost_sub_repo.get_by_id_and_user(subscription_id, user_id)
         
@@ -286,9 +299,15 @@ async def delete_autopost_handler(
     autopost_sub_repo,
 ) -> None:
     """Delete autopost subscription."""
+    # Answer callback immediately to prevent timeout
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
     user_id = callback.from_user.id
     subscription_id = int(callback.data.split(":", 1)[1])
-    
+
     try:
         # Stop monitoring first
         manager = get_autopost_manager()
@@ -523,11 +542,17 @@ async def confirm_create_autopost(
     balance_repo,
 ) -> None:
     """Create new autopost subscription after confirmation."""
+    # Answer callback immediately to prevent timeout
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
     user_id = callback.from_user.id
     parts = callback.data.split(":")
     tg_channel = parts[1]
     max_chat_id = parts[2] if len(parts) > 2 else None
-    
+
     try:
         # Double-check if subscription already exists
         existing = await autopost_sub_repo.get_by_tg_channel(user_id, tg_channel)

@@ -20,7 +20,7 @@ from loguru import logger
 
 
 # Constants
-MAX_RETRIES = 3
+MAX_RETRIES = 5
 
 
 # Session file path
@@ -63,6 +63,7 @@ class TelethonChannelClient:
         self._client: Optional[TelegramClient] = None
         self._session_path = Path(SESSION_FILE + ".session")
         self._keepalive_task: Optional[asyncio.Task] = None
+        self._lock = asyncio.Lock()
 
     def _is_session_exists(self) -> bool:
         """Check if session file exists."""
@@ -153,32 +154,24 @@ class TelethonChannelClient:
             return True
         return False
 
-    async def _call_with_retry(self, method, *args, **kwargs):
-        """Call a Telethon method with retry logic for connection errors.
-        
-        Args:
-            method: The async method to call
-            *args, **kwargs: Arguments to pass to the method
-            
-        Returns:
-            The result of the method call
-            
-        Raises:
-            ConnectionError: If all retries fail
-        """
+    async def _call_with_retry(self, func, *args, **kwargs):
+        """Call a Telethon method with retry logic and locking."""
         for attempt in range(MAX_RETRIES):
             try:
-                return await method(*args, **kwargs)
+                async with self._lock:
+                    return await func(*args, **kwargs)
             except sqlite3.OperationalError as e:
                 if self._is_database_locked_error(e):
-                    logger.warning(f"Telethon database locked, retrying in 5s... (attempt {attempt+1})")
-                    await asyncio.sleep(5)
+                    wait_time = 2 ** (attempt + 1)  # 2, 4, 8, 16, 32 seconds
+                    logger.warning(f"Telethon database locked, retrying in {wait_time}s... (attempt {attempt+1})")
+                    await asyncio.sleep(wait_time)
                     continue
                 raise
             except (ConnectionError, asyncio.TimeoutError, OSError) as e:
                 logger.warning(f"Telethon connection lost, reconnecting... attempt {attempt+1}")
                 try:
-                    await self._client.connect()
+                    async with self._lock:
+                        await self._client.connect()
                 except Exception:
                     pass
                 await asyncio.sleep(2 ** attempt)
@@ -190,21 +183,19 @@ class TelethonChannelClient:
             try:
                 await asyncio.sleep(300)  # 5 minutes
                 if self._client and self._client.is_connected():
-                    await self._client.get_me()
+                    async with self._lock:
+                        await self._client.get_me()
                     logger.debug("Keepalive ping sent")
             except sqlite3.OperationalError as e:
                 if self._is_database_locked_error(e):
                     logger.warning("Keepalive skipped due to database lock")
                     continue
                 logger.warning(f"Keepalive failed: {e}")
-                try:
-                    await self._client.connect()
-                except Exception:
-                    pass
             except Exception as e:
                 logger.warning(f"Keepalive failed: {e}")
                 try:
-                    await self._client.connect()
+                    async with self._lock:
+                        await self._client.connect()
                 except Exception:
                     pass
 
@@ -221,11 +212,11 @@ class TelethonChannelClient:
         Raises:
             Exception: If channel cannot be accessed
         """
-        client = await self._get_client()
+        await self._get_client()
 
         try:
-            entity = await self._call_with_retry(client.get_entity, channel)
-            full = await self._call_with_retry(client, GetFullChannelRequest(entity))
+            entity = await self._call_with_retry(self._client.get_entity, channel)
+            full = await self._call_with_retry(self._client, GetFullChannelRequest(entity))
             return full.full_chat.about or ""
         except Exception as e:
             logger.error(f"Error getting channel description for {channel}: {e}")
@@ -248,12 +239,12 @@ class TelethonChannelClient:
         Raises:
             Exception: If channel cannot be accessed
         """
-        client = await self._get_client()
+        await self._get_client()
 
         try:
             # get_messages with limit=0 returns only total count
             # This is efficient - doesn't fetch actual messages
-            result = await self._call_with_retry(client.get_messages, channel_identifier, limit=0)
+            result = await self._call_with_retry(self._client.get_messages, channel_identifier, limit=0)
             total = result.total
             logger.info(f"Channel {channel_identifier}: {total} posts")
             return total
@@ -287,47 +278,48 @@ class TelethonChannelClient:
         Raises:
             Exception: If channel cannot be accessed
         """
-        client = await self._get_client()
+        await self._get_client()
 
         posts = []
 
         try:
             # iter_messages is memory-efficient for large channels
-            # Use _call_with_retry to handle connection errors on initial call
-            iterator = client.iter_messages(
-                channel_identifier,
-                limit=limit,
-                reverse=reverse,  # oldest first for transfer
-            )
-            async for message in iterator:
-                # Determine media type
-                media_type = None
-                has_media = False
-
-                if message.media:
-                    has_media = True
-                    if isinstance(message.media, MessageMediaPhoto):
-                        media_type = 'photo'
-                    elif isinstance(message.media, MessageMediaDocument):
-                        media_type = 'document'
-                        # Check if it's a video
-                        if message.media.document:
-                            for attr in message.media.document.attributes:
-                                if hasattr(attr, 'video'):
-                                    media_type = 'video'
-                    elif isinstance(message.media, MessageMediaWebPage):
-                        media_type = 'webpage'
-                    else:
-                        media_type = 'unknown'
-
-                post = PostInfo(
-                    id=message.id,
-                    text=message.text or None,
-                    has_media=has_media,
-                    media_type=media_type,
-                    date=int(message.date.timestamp()) if message.date else None,
+            # Wrap iteration in lock to prevent database locked errors
+            async with self._lock:
+                iterator = self._client.iter_messages(
+                    channel_identifier,
+                    limit=limit,
+                    reverse=reverse,  # oldest first for transfer
                 )
-                posts.append(post)
+                async for message in iterator:
+                    # Determine media type
+                    media_type = None
+                    has_media = False
+
+                    if message.media:
+                        has_media = True
+                        if isinstance(message.media, MessageMediaPhoto):
+                            media_type = 'photo'
+                        elif isinstance(message.media, MessageMediaDocument):
+                            media_type = 'document'
+                            # Check if it's a video
+                            if message.media.document:
+                                for attr in message.media.document.attributes:
+                                    if hasattr(attr, 'video'):
+                                        media_type = 'video'
+                        elif isinstance(message.media, MessageMediaWebPage):
+                            media_type = 'webpage'
+                        else:
+                            media_type = 'unknown'
+
+                    post = PostInfo(
+                        id=message.id,
+                        text=message.text or None,
+                        has_media=has_media,
+                        media_type=media_type,
+                        date=int(message.date.timestamp()) if message.date else None,
+                    )
+                    posts.append(post)
 
             logger.info(f"Fetched {len(posts)} posts from {channel_identifier}")
             return posts
@@ -335,6 +327,49 @@ class TelethonChannelClient:
         except Exception as e:
             logger.error(f"Error fetching posts from {channel_identifier}: {e}")
             raise
+
+    async def get_entity(self, channel: str | int):
+        """
+        Get entity (channel/chat/user) by username or ID.
+        
+        Args:
+            channel: Channel username (with or without @), numeric ID, or invite hash
+            
+        Returns:
+            Entity object
+        """
+        await self._get_client()
+        return await self._call_with_retry(self._client.get_entity, channel)
+
+    async def get_full_channel(self, entity):
+        """
+        Get full channel info via GetFullChannelRequest.
+        
+        Args:
+            entity: Channel entity
+            
+        Returns:
+            Full channel info
+        """
+        await self._get_client()
+        return await self._call_with_retry(self._client, GetFullChannelRequest(entity))
+
+    async def iter_messages(self, *args, **kwargs):
+        """
+        Get async generator for iterating over messages.
+        This returns a wrapped iterator that uses the lock.
+        
+        Returns:
+            Async generator over messages
+        """
+        await self._get_client()
+        
+        async def _wrapped_iterator():
+            async with self._lock:
+                async for message in self._client.iter_messages(*args, **kwargs):
+                    yield message
+        
+        return _wrapped_iterator()
 
 
 # Singleton instance getter

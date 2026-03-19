@@ -2,7 +2,7 @@
 
 from typing import TypeVar, Generic, Type, Any
 
-from sqlalchemy import select, update, delete
+from sqlalchemy import select, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.models import Base
@@ -123,7 +123,7 @@ class BaseRepository(Generic[ModelType]):
         Returns:
             Number of entities
         """
-        stmt = select(self._model).count()
+        stmt = select(func.count()).select_from(self._model)
         result = await self._session.execute(stmt)
         return result.scalar() or 0
 

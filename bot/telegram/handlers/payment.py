@@ -3,6 +3,7 @@
 from decimal import Decimal
 
 from aiogram import Router, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -351,8 +352,12 @@ async def callback_check_payment(
     transaction_repo: BalanceTransactionRepository,
 ) -> None:
     """Check payment status."""
-    await callback.answer("⏳ Проверяю оплату...")
-    
+    # Answer callback immediately with loading indicator before any DB operations
+    try:
+        await callback.answer("⏳ Проверяю оплату...")
+    except TelegramBadRequest:
+        pass
+
     payment_id = callback.data.split(":")[1]
     
     # Get payment from DB

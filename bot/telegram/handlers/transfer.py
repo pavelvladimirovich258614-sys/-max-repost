@@ -6,6 +6,7 @@ import time
 from typing import Optional
 
 from aiogram import Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import StateFilter
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -460,9 +461,12 @@ async def select_verified_channel(
         db_session: Database session
         verified_channel_repo: Repository for verified channels
     """
-    # Answer callback FIRST before any async operations
-    await callback.answer()
-    
+    # Answer callback immediately to prevent timeout (BEFORE any Telethon/DB operations)
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
     # Extract channel identifier from callback data
     tg_channel = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
@@ -482,12 +486,11 @@ async def select_verified_channel(
                 api_hash=settings.telegram_api_hash,
                 phone=settings.telegram_phone,
             )
-            client = await telethon._get_client()
             
             # Try by channel_id first (for private channels), then by username
             if tg_channel_id:
                 try:
-                    entity = await client.get_entity(int(tg_channel_id))
+                    entity = await telethon.get_entity(int(tg_channel_id))
                     chat_title = entity.title
                     chat_id = tg_channel_id
                 except Exception:
@@ -495,7 +498,7 @@ async def select_verified_channel(
             
             # Fallback to username/public identifier
             if not chat_title:
-                entity = await client.get_entity(tg_channel)
+                entity = await telethon.get_entity(tg_channel)
                 chat_title = entity.title
                 chat_id = str(entity.id)
                 
@@ -608,9 +611,8 @@ async def process_transfer_tg_channel(
                 phone=settings.telegram_phone,
             )
             # Get entity via Telethon
-            from telethon.tl.functions.channels import GetFullChannelRequest
-            entity = await telethon._client.get_entity(channel_username)
-            full = await telethon._client(GetFullChannelRequest(entity))
+            entity = await telethon.get_entity(channel_username)
+            full = await telethon.get_full_channel(entity)
             chat_id = str(entity.id)
             chat_title = entity.title
             logger.info(f"Channel @{channel_username} found via Telethon: {chat_title}")
@@ -906,9 +908,12 @@ async def check_verification_code(
         db_session: Database session from middleware
         verified_channel_repo: Repository for verified channels
     """
-    # Answer callback FIRST before any async operations
-    await callback.answer("⏳ Проверяю код...")
-    
+    # Answer callback immediately with loading indicator (BEFORE verify_channel_ownership)
+    try:
+        await callback.answer("⏳ Проверяю код...")
+    except TelegramBadRequest:
+        pass
+
     data = await state.get_data()
     code = data.get("verification_code")
     tg_channel = data.get("transfer_tg_channel_username")
@@ -2161,15 +2166,15 @@ async def process_post_count_selection(
         db_session: Database session for duplicate tracking
         user_repo: User repository for tracking free posts
     """
-    # Answer callback FIRST with loading indicator before any async operations
-    await callback.answer("⏳ Подготовка...")
-    
     action = callback.data.split(":", 1)[1]
-    
-    # Handle back button
+
+    # Handle back button (answer immediately without loading indicator)
     if action == "back":
-        # Answer callback FIRST before any async operations
-        await callback.answer()
+        # Answer callback immediately to prevent timeout
+        try:
+            await callback.answer()
+        except TelegramBadRequest:
+            pass
         # Go back to Max channel selection
         data = await state.get_data()
         channel_title = data.get("transfer_tg_channel_title", "Канал")

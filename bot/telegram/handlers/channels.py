@@ -1,6 +1,7 @@
 """Channel management handler - list, view, toggle autopost, delete channels."""
 
 from aiogram import Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 from aiogram.filters import StateFilter
 from loguru import logger
@@ -33,9 +34,12 @@ async def show_channels_list(callback: CallbackQuery, user_repo, channel_repo) -
         user_repo: User repository
         channel_repo: Channel repository
     """
-    # Answer callback FIRST with loading indicator before any async operations
-    await callback.answer("⏳")
-    
+    # Answer callback immediately with loading indicator before any async operations
+    try:
+        await callback.answer("⏳")
+    except TelegramBadRequest:
+        pass
+
     user = await user_repo.get_by_telegram_id(callback.from_user.id)
 
     if user is None:
@@ -95,9 +99,12 @@ async def show_channel_details(callback: CallbackQuery, user_repo, channel_repo)
         user_repo: User repository
         channel_repo: Channel repository
     """
-    # Answer callback FIRST with loading indicator before any async operations
-    await callback.answer("⏳")
-    
+    # Answer callback immediately with loading indicator before any async operations
+    try:
+        await callback.answer("⏳")
+    except TelegramBadRequest:
+        pass
+
     # Extract channel ID
     try:
         channel_id = int(callback.data.split("_")[1])
@@ -170,9 +177,12 @@ async def toggle_autopost(callback: CallbackQuery, user_repo, channel_repo) -> N
         user_repo: User repository
         channel_repo: Channel repository
     """
-    # Answer callback FIRST with loading indicator before any async operations
-    await callback.answer("⏳")
-    
+    # Answer callback immediately with loading indicator before any async operations
+    try:
+        await callback.answer("⏳")
+    except TelegramBadRequest:
+        pass
+
     try:
         channel_id = int(callback.data.split("_")[2])
     except (ValueError, IndexError):
@@ -245,25 +255,41 @@ async def toggle_autopost(callback: CallbackQuery, user_repo, channel_repo) -> N
 @channels_router.callback_query(lambda c: c.data and c.data.startswith("channel_transfer_"))
 async def channel_transfer(callback: CallbackQuery) -> None:
     """Placeholder: Start transfer from existing channel."""
-    await callback.answer("🚧 В разработке", show_alert=True)
+    # Answer callback immediately to prevent timeout
+    try:
+        await callback.answer("🚧 В разработке", show_alert=True)
+    except TelegramBadRequest:
+        pass
 
 
 @channels_router.callback_query(lambda c: c.data and c.data.startswith("channel_filters_"))
 async def channel_filters(callback: CallbackQuery) -> None:
     """Placeholder: Configure channel filters."""
-    await callback.answer("🚧 В разработке", show_alert=True)
+    # Answer callback immediately to prevent timeout
+    try:
+        await callback.answer("🚧 В разработке", show_alert=True)
+    except TelegramBadRequest:
+        pass
 
 
 @channels_router.callback_query(lambda c: c.data and c.data.startswith("channel_check_tg_"))
 async def channel_check_tg(callback: CallbackQuery) -> None:
     """Placeholder: Check Telegram channel connection."""
-    await callback.answer("🚧 В разработке", show_alert=True)
+    # Answer callback immediately to prevent timeout
+    try:
+        await callback.answer("🚧 В разработке", show_alert=True)
+    except TelegramBadRequest:
+        pass
 
 
 @channels_router.callback_query(lambda c: c.data and c.data.startswith("channel_check_max_"))
 async def channel_check_max(callback: CallbackQuery) -> None:
     """Placeholder: Check Max channel connection."""
-    await callback.answer("🚧 В разработке", show_alert=True)
+    # Answer callback immediately to prevent timeout
+    try:
+        await callback.answer("🚧 В разработке", show_alert=True)
+    except TelegramBadRequest:
+        pass
 
 
 # =============================================================================
@@ -279,9 +305,12 @@ async def request_delete_channel(callback: CallbackQuery) -> None:
     Args:
         callback: Callback query with channel_delete_{id}
     """
-    # Answer callback FIRST before any async operations
-    await callback.answer()
-    
+    # Answer callback immediately to prevent timeout
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
     try:
         channel_id = int(callback.data.split("_")[2])
     except (ValueError, IndexError):
@@ -306,9 +335,12 @@ async def confirm_delete_channel(callback: CallbackQuery, user_repo, channel_rep
         user_repo: User repository
         channel_repo: Channel repository
     """
-    # Answer callback FIRST with loading indicator before any async operations
-    await callback.answer("⏳")
-    
+    # Answer callback immediately with loading indicator before any async operations
+    try:
+        await callback.answer("⏳")
+    except TelegramBadRequest:
+        pass
+
     try:
         channel_id = int(callback.data.split("_")[3])
     except (ValueError, IndexError):
@@ -358,9 +390,12 @@ async def cancel_delete_channel(callback: CallbackQuery, user_repo, channel_repo
         user_repo: User repository
         channel_repo: Channel repository
     """
-    # Answer callback FIRST before any async operations
-    await callback.answer()
-    
+    # Answer callback immediately to prevent timeout
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
     # Get the channel ID from the callback data (need to extract it differently)
     # Since we cancelled, we need to go back to the channels list
     # This is a simplified version - in production you'd track which channel was being viewed

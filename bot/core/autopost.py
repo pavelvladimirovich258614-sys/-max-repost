@@ -209,27 +209,25 @@ class AutopostManager:
         channel_identifier = tg_channel_id if tg_channel_id else tg_channel
         
         try:
-            client = await self.telethon_client._get_client()
-            
             # Try to get entity using channel_id (for private) or username (for public)
             try:
                 if tg_channel_id and tg_channel_id.lstrip('-').isdigit():
                     # Use numeric ID for private channels
-                    entity = await client.get_entity(int(tg_channel_id))
+                    entity = await self.telethon_client.get_entity(int(tg_channel_id))
                     logger.info(f"Using channel ID {tg_channel_id} for private channel access")
                 else:
                     # Use username for public channels
-                    entity = await client.get_entity(tg_channel)
+                    entity = await self.telethon_client.get_entity(tg_channel)
             except Exception as e:
                 logger.warning(f"Failed to get entity with ID, trying username: {e}")
-                entity = await client.get_entity(tg_channel)
+                entity = await self.telethon_client.get_entity(tg_channel)
             
             # Catch-up logic: process missed posts before starting polling
             # Returns the updated last_post_id after catch-up
             initial_last_post_id = None
             try:
                 initial_last_post_id = await self._catch_up_missed_posts(
-                    client, entity, channel_identifier, max_chat_id, user_id, subscription
+                    entity, channel_identifier, max_chat_id, user_id, subscription
                 )
             except Exception as e:
                 logger.error(f"Catch-up failed for {tg_channel}: {e}")
@@ -303,14 +301,13 @@ class AutopostManager:
         try:
             while True:
                 try:
-                    client = await self.telethon_client._get_client()
                     new_messages = []
                     
                     # Get messages newer than last_post_id
                     # iter_messages with min_id returns messages with id > min_id
                     # Use channel_identifier (may be numeric ID for private channels)
                     try:
-                        async for msg in client.iter_messages(
+                        async for msg in await self.telethon_client.iter_messages(
                             channel_identifier,
                             min_id=last_post_id,
                             limit=50,
@@ -790,7 +787,6 @@ class AutopostManager:
     
     async def _catch_up_missed_posts(
         self,
-        client,
         entity,
         channel_identifier: str,
         max_chat_id: int,
@@ -801,7 +797,6 @@ class AutopostManager:
         Catch up missed posts that were published while autopost was paused.
         
         Args:
-            client: Telethon client
             entity: Telegram channel entity
             channel_identifier: Telegram channel identifier (username or numeric ID)
             max_chat_id: Max channel chat_id
@@ -826,7 +821,7 @@ class AutopostManager:
         if last_post_id is not None:
             # Get recent messages and filter missed ones
             missed_messages = []
-            async for message in client.iter_messages(entity, limit=50):
+            async for message in await self.telethon_client.iter_messages(entity, limit=50):
                 if message.id > last_post_id:
                     missed_messages.append(message)
             
@@ -984,7 +979,7 @@ class AutopostManager:
         else:
             # First start: get the latest message ID and set it as last_post_id
             latest_message = None
-            async for message in client.iter_messages(entity, limit=1):
+            async for message in await self.telethon_client.iter_messages(entity, limit=1):
                 latest_message = message
                 break
             
