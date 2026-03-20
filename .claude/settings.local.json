@@ -6,7 +6,10 @@
       "mcp__context7__resolve-library-id",
       "Bash(python -c \"from bot.main import main; print\\(''OK''\\)\")",
       "Bash(python -c \"from bot.core.autopost import AutopostManager; print\\(''OK''\\)\")",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ]
   }
 }

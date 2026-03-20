@@ -3,6 +3,7 @@
 from aiogram import Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 from loguru import logger
 
@@ -76,7 +77,7 @@ async def cmd_admin(
 
 
 @admin_router.message(Command("addbalance"))
-async def cmd_addbalance(message: Message) -> None:
+async def cmd_addbalance(message: Message, state: FSMContext) -> None:
     """
     Handle /addbalance command.
 
@@ -84,6 +85,7 @@ async def cmd_addbalance(message: Message) -> None:
 
     Args:
         message: Telegram message
+        state: FSM context
     """
     # Check admin rights
     if not is_admin(message.from_user.id):
@@ -97,7 +99,7 @@ async def cmd_addbalance(message: Message) -> None:
         "Для отмены введите /cancel",
         parse_mode="HTML",
     )
-    await AdminStates.waiting_add_balance_input.set()
+    await state.set_state(AdminStates.waiting_add_balance_input)
 
 
 # =============================================================================
@@ -130,11 +132,15 @@ async def callback_admin_main(callback: CallbackQuery) -> None:
 
 
 @admin_router.callback_query(lambda c: c.data == "admin_add_balance")
-async def callback_admin_add_balance(callback: CallbackQuery) -> None:
+async def callback_admin_add_balance(callback: CallbackQuery, state: FSMContext) -> None:
     """
     Handle 'Add Balance' callback from admin panel.
 
     Prompts for user_id and amount.
+
+    Args:
+        callback: Telegram callback query
+        state: FSM context
     """
     # Check admin rights
     if not is_admin(callback.from_user.id):
@@ -153,12 +159,13 @@ async def callback_admin_add_balance(callback: CallbackQuery) -> None:
         "Для отмены введите /cancel",
         parse_mode="HTML",
     )
-    await AdminStates.waiting_add_balance_input.set()
+    await state.set_state(AdminStates.waiting_add_balance_input)
 
 
 @admin_router.message(AdminStates.waiting_add_balance_input)
 async def process_add_balance_input(
     message: Message,
+    state: FSMContext,
     user_repo: UserRepository,
     autopost_sub_repo: AutopostSubscriptionRepository,
 ) -> None:
@@ -169,13 +176,14 @@ async def process_add_balance_input(
 
     Args:
         message: Telegram message
+        state: FSM context
         user_repo: User repository
         autopost_sub_repo: Autopost subscription repository
     """
     # Check admin rights
     if not is_admin(message.from_user.id):
         await message.answer("❌ У вас нет прав для этой команды.")
-        await AdminStates.waiting_add_balance_input.reset()
+        await state.clear()
         return
 
     text = message.text.strip()
@@ -210,7 +218,7 @@ async def process_add_balance_input(
     target_user = await user_repo.get_by_telegram_id(target_user_id)
     if target_user is None:
         await message.answer(f"❌ Пользователь с telegram_id={target_user_id} не найден.")
-        await AdminStates.waiting_add_balance_input.reset()
+        await state.clear()
         return
 
     # Get old balance
@@ -226,7 +234,7 @@ async def process_add_balance_input(
 
     if new_balance is None:
         await message.answer("❌ Ошибка при начислении баланса.")
-        await AdminStates.waiting_add_balance_input.reset()
+        await state.clear()
         return
 
     # Check if user has paused subscriptions due to insufficient funds and resume them
@@ -251,7 +259,7 @@ async def process_add_balance_input(
         response,
         reply_markup=admin_main_keyboard(),
     )
-    await AdminStates.waiting_add_balance_input.reset()
+    await state.clear()
 
     # Notify user about balance top-up
     try:
