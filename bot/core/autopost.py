@@ -85,7 +85,7 @@ class AutopostManager:
     def __init__(self, telethon_client, max_client: MaxClient, bot=None):
         """
         Initialize the autopost manager.
-        
+
         Args:
             telethon_client: TelethonChannelClient instance
             max_client: MaxClient instance for sending to Max
@@ -98,12 +98,15 @@ class AutopostManager:
         self.active_tasks: dict[str, dict] = {}
         # Album buffer: grouped_id -> {messages, timer_task, max_chat_id, user_id, tg_channel, subscription}
         self._album_buffer: dict[str, dict] = {}
-        
+
         # Create temp directory for downloads
         os.makedirs(self.TEMP_DIR, exist_ok=True)
-        
+
         # Track last low balance notification time per user to prevent spam
         self._low_balance_notified: dict[int, datetime] = {}
+
+        # Entity cache: tg_channel -> Telethon entity (avoids repeated get_entity calls)
+        self._entity_cache: dict[str, object] = {}
     
     async def _check_and_notify_low_balance(self, user_id: int) -> None:
         """
@@ -179,6 +182,96 @@ class AutopostManager:
         builder = InlineKeyboardBuilder()
         builder.button(text="💰 Пополнить", callback_data="balance_deposit")
         return builder.as_markup()
+
+    async def _resolve_entity_with_fallback(
+        self,
+        tg_channel: str,
+        tg_channel_id: str | int | None = None,
+    ) -> object | None:
+        """
+        Resolve channel entity trying username first, then numeric ID.
+
+        Telethon can resolve public channels by username without subscription.
+        For private channels (or if user is subscribed), numeric ID works.
+
+        Args:
+            tg_channel: Channel username (without @)
+            tg_channel_id: Optional numeric channel ID from database
+
+        Returns:
+            Telethon entity object, or None if both methods fail
+        """
+        # Check cache first
+        if tg_channel in self._entity_cache:
+            return self._entity_cache[tg_channel]
+
+        entity = None
+        method_used = None
+
+        # Method 1: Try by username FIRST (works for public channels without subscription)
+        try:
+            logger.debug(f"Trying to resolve @{tg_channel} by username...")
+            entity = await asyncio.wait_for(
+                self.telethon_client.get_entity(tg_channel),
+                timeout=30
+            )
+            method_used = "username"
+            logger.info(f"Resolved @{tg_channel} by username")
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout resolving @{tg_channel} by username")
+        except Exception as e:
+            error_msg = str(e)
+            # Check if it's a private channel error
+            if "Could not find the input entity" in error_msg or "Channel not found" in error_msg:
+                logger.debug(f"Username resolution failed for @{tg_channel}, will try numeric ID")
+            else:
+                logger.debug(f"Username resolution failed for @{tg_channel}: {e}")
+
+        # Method 2: Try by numeric ID (fallback, works for private channels if subscribed)
+        if entity is None and tg_channel_id:
+            # Convert to int if string
+            if isinstance(tg_channel_id, str) and tg_channel_id.lstrip('-').isdigit():
+                tg_channel_id = int(tg_channel_id)
+
+            try:
+                logger.debug(f"Trying to resolve @{tg_channel} by numeric ID {tg_channel_id}...")
+                entity = await asyncio.wait_for(
+                    self.telethon_client.get_entity(tg_channel_id),
+                    timeout=30
+                )
+                method_used = "numeric_id"
+                logger.info(f"Resolved @{tg_channel} by numeric ID {tg_channel_id}")
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout resolving @{tg_channel} by numeric ID")
+            except Exception as e:
+                error_msg = str(e)
+                if "Could not find the input entity" in error_msg:
+                    logger.warning(
+                        f"Cannot access private channel @{tg_channel} - "
+                        f"Telethon user must join it first (user session not subscribed)"
+                    )
+                else:
+                    logger.debug(f"Numeric ID resolution failed for @{tg_channel}: {e}")
+
+        # Cache the result if successful
+        if entity is not None:
+            self._entity_cache[tg_channel] = entity
+            logger.info(f"Entity cached for @{tg_channel} (resolved via {method_used})")
+        else:
+            logger.warning(f"Failed to resolve entity for @{tg_channel} - channel may be private or inaccessible")
+
+        return entity
+
+    def _invalidate_entity_cache(self, tg_channel: str) -> None:
+        """Remove entity from cache (e.g., after error)."""
+        self._entity_cache.pop(tg_channel, None)
+        logger.debug(f"Entity cache invalidated for @{tg_channel}")
+
+    def _get_deposit_keyboard(self) -> InlineKeyboardMarkup:
+        """Get keyboard with deposit button for low balance notifications."""
+        builder = InlineKeyboardBuilder()
+        builder.button(text="💰 Пополнить", callback_data="balance_deposit")
+        return builder.as_markup()
     
     def _should_skip_autopost(self, message: Message) -> tuple[bool, str]:
         """Check if message should be skipped for autopost.
@@ -231,87 +324,43 @@ class AutopostManager:
         # For private channels, use tg_channel_id if available
         tg_channel_id = getattr(subscription, 'tg_channel_id', None)
         channel_identifier = _resolve_entity_id(tg_channel_id if tg_channel_id else tg_channel)
-        
-        try:
-            # Try to get entity using channel_id (for private) or username (for public)
-            entity = None
-            try:
-                if tg_channel_id and tg_channel_id.lstrip('-').isdigit():
-                    # Use numeric ID for private channels
-                    entity = await asyncio.wait_for(
-                        self.telethon_client.get_entity(int(tg_channel_id)),
-                        timeout=30
-                    )
-                    if entity:
-                        logger.info(f"Using channel ID {tg_channel_id} for private channel access")
-                else:
-                    # Use username for public channels
-                    entity = await asyncio.wait_for(
-                        self.telethon_client.get_entity(tg_channel),
-                        timeout=30
-                    )
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout (30s) getting entity for {tg_channel}, skipping this channel")
-                return False
-            except FloodWaitError as e:
-                if e.seconds > 60:
-                    logger.error(f"FloodWaitError on get_entity for {tg_channel}: {e.seconds}s > 60s, skipping this channel")
-                    return False
-                logger.info(f"FloodWaitError on get_entity: waiting {e.seconds}s")
-                await asyncio.sleep(e.seconds)
-                # Retry once after wait
-                try:
-                    if tg_channel_id and tg_channel_id.lstrip('-').isdigit():
-                        entity = await asyncio.wait_for(
-                            self.telethon_client.get_entity(int(tg_channel_id)),
-                            timeout=30
-                        )
-                    else:
-                        entity = await asyncio.wait_for(
-                            self.telethon_client.get_entity(tg_channel),
-                            timeout=30
-                        )
-                except asyncio.TimeoutError:
-                    logger.warning(f"Timeout (30s) on retry getting entity for {tg_channel}, skipping this channel")
-                    return False
 
-            if entity is None:
-                logger.warning(f"Failed to get entity for {tg_channel} - returned None (likely FloodWait)")
-                return False
-            
-            # Catch-up logic: process missed posts before starting polling
-            # Returns the updated last_post_id after catch-up
-            initial_last_post_id = None
-            try:
-                initial_last_post_id = await self._catch_up_missed_posts(
-                    entity, channel_identifier, max_chat_id, user_id, subscription
-                )
-            except Exception as e:
-                logger.error(f"Catch-up failed for {tg_channel}: {e}")
-                # Continue with monitoring even if catch-up fails
-            
-            # Start polling task with the updated last_post_id from catch-up
-            # This prevents duplicate processing of posts handled during catch-up
-            task = asyncio.create_task(
-                self._monitor_channel_polling(
-                    channel_identifier, max_chat_id, user_id, subscription, initial_last_post_id
-                )
-            )
-            
-            # Store task info
-            self.active_tasks[tg_channel] = {
-                "max_chat_id": max_chat_id,
-                "user_id": user_id,
-                "task": task,
-                "subscription": subscription,
-            }
-            
-            logger.info(f"Autopost polling started: {tg_channel} -> {max_chat_id}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to start autopost for {tg_channel}: {e}")
+        # Resolve entity using fallback logic (username first, then numeric ID)
+        entity = await self._resolve_entity_with_fallback(tg_channel, tg_channel_id)
+
+        if entity is None:
+            logger.warning(f"Could not resolve entity for @{tg_channel} - skipping autopost start")
             return False
+
+        # Catch-up logic: process missed posts before starting polling
+        # Returns the updated last_post_id after catch-up
+        initial_last_post_id = None
+        try:
+            initial_last_post_id = await self._catch_up_missed_posts(
+                entity, channel_identifier, max_chat_id, user_id, subscription
+            )
+        except Exception as e:
+            logger.error(f"Catch-up failed for {tg_channel}: {e}")
+            # Continue with monitoring even if catch-up fails
+
+        # Start polling task with the updated last_post_id from catch-up
+        # This prevents duplicate processing of posts handled during catch-up
+        task = asyncio.create_task(
+            self._monitor_channel_polling(
+                channel_identifier, max_chat_id, user_id, subscription, initial_last_post_id
+            )
+        )
+
+        # Store task info
+        self.active_tasks[tg_channel] = {
+            "max_chat_id": max_chat_id,
+            "user_id": user_id,
+            "task": task,
+            "subscription": subscription,
+        }
+
+        logger.info(f"Autopost polling started: {tg_channel} -> {max_chat_id}")
+        return True
     
     async def _monitor_channel_polling(
         self,
@@ -362,12 +411,12 @@ class AutopostManager:
                     
                     # Get messages newer than last_post_id
                     # iter_messages with min_id returns messages with id > min_id
-                    # Use channel_identifier (may be numeric ID for private channels)
+                    # Use cached entity if available, otherwise fall back to channel_identifier
                     try:
-                        # Resolve to int if numeric string for Telethon compatibility
-                        resolved_id = _resolve_entity_id(channel_identifier)
+                        # Try to use cached entity for efficiency
+                        iter_target = self._entity_cache.get(tg_channel, channel_identifier)
                         async for msg in await self.telethon_client.iter_messages(
-                            resolved_id,
+                            iter_target,
                             min_id=last_post_id,
                             limit=50,
                         ):
@@ -377,15 +426,16 @@ class AutopostManager:
                                 new_messages.append(msg)
                     except (ConnectionError, asyncio.TimeoutError, OSError) as e:
                         logger.warning(f"Connection lost in polling for @{tg_channel}, will retry: {e}")
+                        # Invalidate entity cache on connection errors - might need to re-resolve
+                        self._invalidate_entity_cache(tg_channel)
                         await asyncio.sleep(self.ERROR_INTERVAL)
                         continue  # Don't stop polling, continue to next iteration
                     except FloodWaitError as e:
                         if e.seconds > 60:
                             logger.warning(f"FloodWaitError in polling for @{tg_channel}: {e.seconds}s > 60s, waiting ERROR_INTERVAL")
-                            await asyncio.sleep(self.ERROR_INTERVAL)
                         else:
                             logger.info(f"FloodWaitError in polling for @{tg_channel}: waiting {e.seconds}s")
-                            await asyncio.sleep(e.seconds)
+                        await asyncio.sleep(e.seconds if e.seconds <= 60 else self.ERROR_INTERVAL)
                         continue  # Don't stop polling, continue to next iteration
                     except sqlite3.OperationalError as e:
                         if "database is locked" in str(e).lower():
@@ -451,15 +501,15 @@ class AutopostManager:
                     raise
                 except (ConnectionError, asyncio.TimeoutError, OSError) as e:
                     logger.warning(f"Connection lost in polling for @{tg_channel}, will retry: {e}")
+                    self._invalidate_entity_cache(tg_channel)
                     await asyncio.sleep(self.ERROR_INTERVAL)
                     continue  # Don't stop polling, continue to next iteration
                 except FloodWaitError as e:
                     if e.seconds > 60:
                         logger.warning(f"FloodWaitError in polling for @{tg_channel}: {e.seconds}s > 60s, waiting ERROR_INTERVAL")
-                        await asyncio.sleep(self.ERROR_INTERVAL)
                     else:
                         logger.info(f"FloodWaitError in polling for @{tg_channel}: waiting {e.seconds}s")
-                        await asyncio.sleep(e.seconds)
+                    await asyncio.sleep(e.seconds if e.seconds <= 60 else self.ERROR_INTERVAL)
                     continue  # Don't stop polling, continue to next iteration
                 except sqlite3.OperationalError as e:
                     if "database is locked" in str(e).lower():
@@ -1071,35 +1121,38 @@ class AutopostManager:
     async def stop_autopost(self, tg_channel: str) -> bool:
         """
         Stop autoposting for a channel.
-        
+
         Args:
             tg_channel: Telegram channel username (with or without @)
-            
+
         Returns:
             True if stopped successfully, False otherwise
         """
         # Normalize channel name
         if tg_channel.startswith('@'):
             tg_channel = tg_channel[1:]
-        
+
         if tg_channel not in self.active_tasks:
             logger.info(f"Autopost not active for {tg_channel}")
             return False
-        
+
         try:
             task_info = self.active_tasks.pop(tg_channel)
             task = task_info.get("task")
-            
+
             if task and not task.done():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
-            
+
             # Flush any pending albums for this channel
             await self._flush_pending_albums_for_channel(tg_channel)
-            
+
+            # Invalidate entity cache when stopping autopost
+            self._invalidate_entity_cache(tg_channel)
+
             logger.info(f"Autopost stopped: {tg_channel}")
             return True
             
