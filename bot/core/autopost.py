@@ -14,6 +14,7 @@ from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from loguru import logger
 from telethon.tl.types import Message
+from telethon.errors import FloodWaitError
 
 from bot.core.transfer_engine import convert_entities_to_html
 from bot.max_api.client import MaxClient, AttachmentNotReadyError
@@ -210,17 +211,31 @@ class AutopostManager:
         
         try:
             # Try to get entity using channel_id (for private) or username (for public)
+            entity = None
             try:
                 if tg_channel_id and tg_channel_id.lstrip('-').isdigit():
                     # Use numeric ID for private channels
                     entity = await self.telethon_client.get_entity(int(tg_channel_id))
-                    logger.info(f"Using channel ID {tg_channel_id} for private channel access")
+                    if entity:
+                        logger.info(f"Using channel ID {tg_channel_id} for private channel access")
                 else:
                     # Use username for public channels
                     entity = await self.telethon_client.get_entity(tg_channel)
-            except Exception as e:
-                logger.warning(f"Failed to get entity with ID, trying username: {e}")
-                entity = await self.telethon_client.get_entity(tg_channel)
+            except FloodWaitError as e:
+                if e.seconds > 60:
+                    logger.error(f"FloodWaitError on get_entity for {tg_channel}: {e.seconds}s > 60s, skipping this channel")
+                    return False
+                logger.info(f"FloodWaitError on get_entity: waiting {e.seconds}s")
+                await asyncio.sleep(e.seconds)
+                # Retry once after wait
+                if tg_channel_id and tg_channel_id.lstrip('-').isdigit():
+                    entity = await self.telethon_client.get_entity(int(tg_channel_id))
+                else:
+                    entity = await self.telethon_client.get_entity(tg_channel)
+
+            if entity is None:
+                logger.warning(f"Failed to get entity for {tg_channel} - returned None (likely FloodWait)")
+                return False
             
             # Catch-up logic: process missed posts before starting polling
             # Returns the updated last_post_id after catch-up
@@ -320,6 +335,14 @@ class AutopostManager:
                         logger.warning(f"Connection lost in polling for @{tg_channel}, will retry: {e}")
                         await asyncio.sleep(self.ERROR_INTERVAL)
                         continue  # Don't stop polling, continue to next iteration
+                    except FloodWaitError as e:
+                        if e.seconds > 60:
+                            logger.warning(f"FloodWaitError in polling for @{tg_channel}: {e.seconds}s > 60s, waiting ERROR_INTERVAL")
+                            await asyncio.sleep(self.ERROR_INTERVAL)
+                        else:
+                            logger.info(f"FloodWaitError in polling for @{tg_channel}: waiting {e.seconds}s")
+                            await asyncio.sleep(e.seconds)
+                        continue  # Don't stop polling, continue to next iteration
                     except sqlite3.OperationalError as e:
                         if "database is locked" in str(e).lower():
                             logger.warning(f"Database locked in polling for @{tg_channel}, waiting 5s...")
@@ -385,6 +408,14 @@ class AutopostManager:
                 except (ConnectionError, asyncio.TimeoutError, OSError) as e:
                     logger.warning(f"Connection lost in polling for @{tg_channel}, will retry: {e}")
                     await asyncio.sleep(self.ERROR_INTERVAL)
+                    continue  # Don't stop polling, continue to next iteration
+                except FloodWaitError as e:
+                    if e.seconds > 60:
+                        logger.warning(f"FloodWaitError in polling for @{tg_channel}: {e.seconds}s > 60s, waiting ERROR_INTERVAL")
+                        await asyncio.sleep(self.ERROR_INTERVAL)
+                    else:
+                        logger.info(f"FloodWaitError in polling for @{tg_channel}: waiting {e.seconds}s")
+                        await asyncio.sleep(e.seconds)
                     continue  # Don't stop polling, continue to next iteration
                 except sqlite3.OperationalError as e:
                     if "database is locked" in str(e).lower():

@@ -16,7 +16,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage
 from telethon.tl.functions.channels import GetFullChannelRequest
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
 from loguru import logger
 
 
@@ -111,8 +111,13 @@ class TelethonChannelClient:
 
             # Start the client (connect + auth + start update loop)
             # This is REQUIRED for receiving NewMessage events
-            await self._client.start(phone=self.phone)
-            logger.info(f"Telethon client started with user session: {self.phone}")
+            try:
+                await self._client.start(phone=self.phone)
+                logger.info(f"Telethon client started with user session: {self.phone}")
+            except FloodWaitError as e:
+                logger.error(f"FloodWaitError on start(): {e.seconds}s, aborting Telethon start")
+                logger.warning("Bot will continue without Telethon - autopost may not work")
+                raise RuntimeError(f"Telethon FloodWaitError: {e.seconds}s")
             
             # Start keepalive task to maintain connection
             if self._keepalive_task is None or self._keepalive_task.done():
@@ -171,6 +176,13 @@ class TelethonChannelClient:
             try:
                 async with self._lock:
                     return await func(*args, **kwargs)
+            except FloodWaitError as e:
+                if e.seconds > 60:
+                    logger.warning(f"FloodWait: {e.seconds}s > 60s, skipping operation")
+                    return None
+                logger.info(f"FloodWait: waiting {e.seconds}s before retry")
+                await asyncio.sleep(e.seconds)
+                continue
             except sqlite3.OperationalError as e:
                 if self._is_database_locked_error(e):
                     wait_time = 2 ** (attempt + 1)  # 2, 4, 8, 16, 32 seconds
@@ -194,9 +206,16 @@ class TelethonChannelClient:
             try:
                 await asyncio.sleep(300)  # 5 minutes
                 if self._client and self._client.is_connected():
-                    async with self._lock:
-                        await self._client.get_me()
-                    logger.debug("Keepalive ping sent")
+                    try:
+                        async with self._lock:
+                            await self._client.get_me()
+                        logger.debug("Keepalive ping sent")
+                    except FloodWaitError as e:
+                        if e.seconds > 60:
+                            logger.warning(f"Keepalive: FloodWait {e.seconds}s > 60s, skipping ping")
+                        else:
+                            logger.info(f"Keepalive: FloodWait {e.seconds}s, waiting")
+                            await asyncio.sleep(e.seconds)
             except sqlite3.OperationalError as e:
                 if self._is_database_locked_error(e):
                     logger.warning("Keepalive skipped due to database lock")
@@ -342,15 +361,18 @@ class TelethonChannelClient:
     async def get_entity(self, channel: str | int):
         """
         Get entity (channel/chat/user) by username or ID.
-        
+
         Args:
             channel: Channel username (with or without @), numeric ID, or invite hash
-            
+
         Returns:
-            Entity object
+            Entity object or None if FloodWait > 60s
         """
         await self._get_client()
-        return await self._call_with_retry(self._client.get_entity, channel)
+        result = await self._call_with_retry(self._client.get_entity, channel)
+        if result is None:
+            logger.warning(f"get_entity({channel}) returned None due to FloodWait")
+        return result
 
     async def get_full_channel(self, entity):
         """

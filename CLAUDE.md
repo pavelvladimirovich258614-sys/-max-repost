@@ -8,6 +8,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Business model: Paid transfers at 3 RUB/post, with 5 free trial posts per user.
 
+**Core Services:**
+- Manual post transfer (bulk)
+- Autoposting (automatic forwarding of new posts)
+- YooKassa payment integration
+- Max bot listener (responds to messages in Max messenger)
+
 ## Development Commands
 
 ### Running the Bot
@@ -35,11 +41,33 @@ docker-compose up -d
 ```
 
 ### Telethon Authentication
-The bot requires a Telethon **user session** (not bot token) to read TG channel history. The session file `user_session.session` must exist in the project root.
+The bot requires a Telethon **user session** (not bot token) to read TG channel history. Two formats are supported:
+1. **Session file** (`user_session.session`) in project root - for local development
+2. **String session** (`TELETHON_SESSION_STRING` env var) - for production (recommended)
 
-To authorize:
+To authorize/create session:
 ```bash
 python scripts/auth_telethon.py
+```
+
+To export existing session to string (for production):
+```bash
+python scripts/export_session.py
+```
+
+### Development/Debug Scripts
+```bash
+# Get Max chat ID from channel link
+python scripts/get_max_chat_id.py
+
+# Listen to Telegram updates (debug Telethon)
+python scripts/listen_updates.py
+
+# Inspect channel posts without transferring
+python scripts/inspect_posts.py @channel_name
+
+# Test transfer manually
+python scripts/test_transfer.py
 ```
 
 ## Architecture
@@ -67,6 +95,41 @@ python scripts/auth_telethon.py
 - `count_channel_posts()` - efficient count without fetching messages
 - `iter_messages()` - memory-efficient iteration with `reverse=True`
 
+**`bot/core/autopost.py`** - Automatic post forwarding (autoposting)
+- **Polling-based** (not event handlers) for reliability with channel authorship
+- `POLL_INTERVAL = 10` seconds for checking new messages
+- **Album buffering**: Collects album parts for `ALBUM_BUFFER_WAIT = 2` seconds before forwarding
+- **Catch-up logic**: Processes missed posts when autoposting resumes after pause
+- Private channel support (uses numeric ID instead of username)
+- Low balance notifications (max once per day per user)
+- Singleton pattern via `get_autopost_manager()` / `set_autopost_manager()`
+
+### Payment System
+
+**`bot/payments/yookassa_client.py`** - YooKassa payment gateway client
+- Creates payments with 54-FZ receipts (required for production)
+- `create_payment()` - returns (payment_id, confirmation_url)
+- `check_payment()` - returns status: "pending", "succeeded", "canceled"
+- Uses `RECEIPT_EMAIL` from settings for fiscal receipts
+
+**`bot/payments/payment_checker.py`** - Background payment status checker
+- Polls YooKassa for pending payments
+- Credits user balance on successful payment
+- Runs as background task in `main.py`
+
+**`bot/payments/webhook_server.py`** - YooKassa webhook server (optional fallback)
+- aiohttp-based server for payment notifications
+- Controlled by `WEBHOOK_ENABLED`, `WEBHOOK_HOST`, `WEBHOOK_PORT` settings
+- Runs alongside polling as backup
+
+### Max Bot Listener
+
+**`bot/max_api/max_bot_handler.py`** - Responds to messages in Max messenger
+- Polls Max API for `bot_started` and `message_created` events
+- Sends setup instructions when users start the Max bot
+- Required for Max channel setup flow (add bot as subscriber/admin)
+- Runs as background task in `main.py`
+
 ### Telegram Bot (aiogram)
 
 **FSM Storage**: `MemoryStorage` (in-memory, not Redis)
@@ -89,12 +152,13 @@ python scripts/auth_telethon.py
 **Connection**: SQLite (`./data/bot.db`) via aiosqlite. PostgreSQL was planned but SQLite is currently used.
 
 **Key Models** (`bot/database/models.py`):
-- `User` - balance, `free_posts_used` (max 5), admin flag
+- `User` - balance, `free_posts_used` (max 5), admin flag, referral_code
 - `Channel` - TG→Max bindings, auto_repost flag
 - `Post` - tracking reposted content
 - `TransferredPost` - duplicate protection (unique per TG channel + Max channel + msg_id)
 - `MaxChannelBinding` - saved Max channels for quick reuse
 - `VerifiedChannel` - verified TG channel ownership
+- `AutopostSubscription` - autopost settings (tg_channel, max_chat_id, last_post_id, pause_reason)
 - `Payment` - YooKassa transactions
 
 **Repositories**: All in `bot/database/repositories/`. Use repository pattern, not direct ORM access in handlers.
@@ -111,12 +175,23 @@ python scripts/auth_telethon.py
 **File**: `config/settings.py` (Pydantic Settings)
 
 **Key .env variables**:
+- `TELEGRAM_BOT_TOKEN` - Telegram bot token (BotFather)
+- `ADMIN_IDS` - Comma-separated list of admin Telegram IDs
 - `TELEGRAM_API_ID`/`HASH` - For Telethon (get from https://my.telegram.org)
 - `TELEGRAM_PHONE` - User session phone number
+- `TELETHON_SESSION_STRING` - String session format (alternative to .session file, recommended for production)
 - `MAX_ACCESS_TOKEN` - Max Platform API token
-- `DATABASE_URL` - Defaults to SQLite
+- `DATABASE_URL` - Defaults to `sqlite+aiosqlite:///./data/bot.db`
+- `REDIS_URL` - Redis connection string (currently unused, reserved for future)
+- `YOOKASSA_SHOP_ID`/`SECRET_KEY` - YooKassa payment credentials
+- `YOOKASSA_RETURN_URL` - Redirect URL after payment (default: bot's TG link)
+- `RECEIPT_EMAIL` - Default email for 54-FZ receipts
 - `PRICE_PER_POST` - Default 3 (RUB)
+- `FREE_POSTS_BONUS` - Default 10 free posts
 - `MAX_RPS` - Rate limit for Max API (default 25)
+- `BONUS_CHANNEL` - Channel for bonus subscription verification
+- `WEBHOOK_ENABLED` - Enable YooKassa webhook server (default: true)
+- `WEBHOOK_HOST`/`PORT` - Webhook server binding (default: 0.0.0.0:8080)
 
 ## Common Patterns
 
@@ -155,6 +230,39 @@ attachment = {"type": "image", "payload": {"token": token}}
 await max_client.send_message(chat_id, text, attachments=[attachment], format="html")
 ```
 
+### Autopost Manager Usage
+```python
+from bot.core.autopost import get_autopost_manager
+
+# Get global autopost manager instance
+manager = get_autopost_manager()
+if manager:
+    # Start autoposting for a channel
+    await manager.start_autopost(
+        tg_channel="@channel",
+        max_chat_id=12345,
+        user_id=user_id,
+        subscription=subscription_obj,
+    )
+    # Check if active
+    is_active = manager.is_active("@channel")
+    # Stop autoposting
+    await manager.stop_autopost("@channel")
+```
+
+### Payment Creation
+```python
+from bot.payments.yookassa_client import YooKassaClient
+
+client = YooKassaClient()
+payment_id, confirmation_url = await client.create_payment(
+    user_id=telegram_id,
+    amount_rub=Decimal("100.00"),
+    description="Пополнение баланса",
+)
+# Send confirmation_url to user for payment
+```
+
 ## Important Notes
 
 - **Telethon session must exist** before running bot. Run auth script if missing.
@@ -164,3 +272,8 @@ await max_client.send_message(chat_id, text, attachments=[attachment], format="h
 - **FSM uses MemoryStorage** - state is lost on bot restart.
 - **Text chunks** >4000 chars are split into multiple Max messages.
 - **Album posts** with grouped_id are handled but only first media is transferred (TODO: full album support).
+- **Autoposting uses polling** (not event handlers) - more reliable for channels where user is author.
+- **Private channels** require numeric channel ID, not username (stored in `tg_channel_id` column).
+- **Attachment not ready** - Max API needs time to process uploads (up to 60s for large files). Use `_send_with_retry()` pattern.
+- **Balance charging** - Autopost charges per post (3 RUB = 3 posts from balance), admins bypass charge.
+- **Graceful shutdown** - Bot handles SIGTERM/SIGINT, stops autopost tasks, closes clients properly.

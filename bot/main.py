@@ -208,15 +208,26 @@ async def main() -> None:
         phone=settings.telegram_phone,
         session_string=settings.telethon_session_string,
     )
-    
+
     # Initialize and start the Telethon client
     # This connects and starts the internal update loop
-    await telethon_client._get_client()
+    try:
+        await telethon_client._get_client()
+    except (Exception, RuntimeError) as e:
+        logger.error(f"Failed to start Telethon client: {e}")
+        logger.warning("Bot will continue WITHOUT Telethon - autopost and transfer features will NOT work")
+        telethon_client = None
     
     max_client = MaxClient(settings.max_access_token)
-    autopost_manager = AutopostManager(telethon_client, max_client, bot)
-    set_autopost_manager(autopost_manager)
-    logger.info("AutopostManager initialized")
+
+    # Only initialize autopost if Telethon is available
+    autopost_manager = None
+    if telethon_client:
+        autopost_manager = AutopostManager(telethon_client, max_client, bot)
+        set_autopost_manager(autopost_manager)
+        logger.info("AutopostManager initialized")
+    else:
+        logger.warning("AutopostManager NOT initialized - Telethon unavailable")
 
     # Initialize YooKassa client
     yookassa_client = YooKassaClient()
@@ -238,13 +249,23 @@ async def main() -> None:
         )
         logger.info("Webhook server started")
 
-    # Load active autopost subscriptions
-    async with get_session() as session:
-        repo = AutopostSubscriptionRepository(session)
-        active_subs = await repo.get_active_subscriptions()
-        for sub in active_subs:
-            await autopost_manager.start_monitoring(sub)
-        logger.info(f"Autopost: loaded {len(active_subs)} active subscriptions")
+    # Load active autopost subscriptions (only if Telethon is available)
+    if autopost_manager:
+        async with get_session() as session:
+            repo = AutopostSubscriptionRepository(session)
+            active_subs = await repo.get_active_subscriptions()
+            channels_list = [f"@{s.tg_channel}" for s in active_subs]
+            logger.info(f"Autopost: loading {len(active_subs)} active subscriptions: {', '.join(channels_list)}")
+            loaded_count = 0
+            for sub in active_subs:
+                try:
+                    await autopost_manager.start_monitoring(sub)
+                    loaded_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to start autopost for @{sub.tg_channel}: {e}")
+            logger.info(f"Autopost: successfully loaded {loaded_count}/{len(active_subs)} subscriptions")
+    else:
+        logger.info("Autopost: skipping load - Telethon unavailable")
 
     # Start Max bot listener (responds to messages in Max messenger)
     max_listener = MaxBotListener(settings.max_access_token)
@@ -258,13 +279,20 @@ async def main() -> None:
 
     # Start polling and Telethon event loop in parallel
     try:
-        await asyncio.gather(
-            dp.start_polling(
+        if telethon_client:
+            await asyncio.gather(
+                dp.start_polling(
+                    bot,
+                    allowed_updates=dp.resolve_used_update_types(),
+                ),
+                telethon_client.run_until_disconnected(),
+            )
+        else:
+            logger.warning("Starting bot WITHOUT Telethon - only aiogram polling")
+            await dp.start_polling(
                 bot,
                 allowed_updates=dp.resolve_used_update_types(),
-            ),
-            telethon_client.run_until_disconnected(),
-        )
+            )
     except (asyncio.CancelledError, KeyboardInterrupt):
         logger.info("Received shutdown signal")
     except Exception as e:
@@ -328,11 +356,12 @@ async def main() -> None:
             logger.error(f"Error closing Max API client: {e}")
         
         # Disconnect Telethon client
-        try:
-            await telethon_client.close()
-            logger.debug("Telethon client closed")
-        except Exception as e:
-            logger.error(f"Error closing Telethon client: {e}")
+        if telethon_client:
+            try:
+                await telethon_client.close()
+                logger.debug("Telethon client closed")
+            except Exception as e:
+                logger.error(f"Error closing Telethon client: {e}")
         
         logger.info("Max-Repost Bot stopped")
 

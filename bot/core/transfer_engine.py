@@ -505,9 +505,9 @@ def should_skip_message(message: Message, post_index: int = 0) -> tuple[bool, st
     if not has_media and has_text:
         raw_text = message.raw_text or message.text or message.message or ""
         text_len = len(raw_text.strip())
-        
+
         # Skip short text-only messages (likely chat chatter)
-        if text_len < 20:
+        if text_len < 5:
             preview = raw_text[:30].replace('\n', ' ')
             logger.info(f"Post {post_index}: SKIP - short text ({text_len} chars): '{preview}'")
             return True, f"short text: {text_len} chars"

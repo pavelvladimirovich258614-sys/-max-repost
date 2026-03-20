@@ -10,6 +10,8 @@ from loguru import logger
 from bot.telegram.keyboards.main import back_to_menu_keyboard
 from bot.database.models import MaxChannelBinding
 from bot.core.autopost import get_autopost_manager
+from bot.database.repositories.verified_channel import VerifiedChannelRepository
+from bot.database.connection import get_session
 
 # Constants
 COST_PER_POST = 3  # 3 rubles per post
@@ -538,6 +540,7 @@ async def select_channel_for_autopost(
 async def confirm_create_autopost(
     callback: CallbackQuery,
     state: FSMContext,
+    session,
     autopost_sub_repo,
     balance_repo,
 ) -> None:
@@ -569,7 +572,18 @@ async def confirm_create_autopost(
         # Get stored channel name from state
         state_data = await state.get_data()
         max_channel_name = state_data.get("selected_max_channel_name")
-        
+
+        # Try to get tg_channel_id from verified_channels
+        tg_channel_id = None
+        try:
+            verified_repo = VerifiedChannelRepository(session)
+            verified = await verified_repo.get_verified_channel(user_id, tg_channel)
+            if verified and verified.tg_channel_id:
+                tg_channel_id = verified.tg_channel_id
+                logger.info(f"Found tg_channel_id={tg_channel_id} for @{tg_channel} from verified_channels")
+        except Exception as e:
+            logger.warning(f"Could not get tg_channel_id from verified_channels: {e}")
+
         # Create new subscription
         sub = await autopost_sub_repo.create(
             user_id=user_id,
@@ -577,6 +591,7 @@ async def confirm_create_autopost(
             max_chat_id=max_chat_id,
             is_active=True,
             posts_transferred=0,
+            tg_channel_id=tg_channel_id,
         )
         
         if max_channel_name:
