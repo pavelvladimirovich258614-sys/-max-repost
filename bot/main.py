@@ -160,7 +160,7 @@ async def _graceful_shutdown_tasks(loop: asyncio.AbstractEventLoop, timeout: flo
 def setup_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
     """
     Set up signal handlers for graceful shutdown on SIGTERM and SIGINT.
-    
+
     Args:
         loop: The asyncio event loop to use for signal handling
     """
@@ -169,7 +169,7 @@ def setup_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
         shutdown_event.set()
         # Schedule graceful shutdown in the event loop
         asyncio.create_task(_graceful_shutdown_tasks(loop, timeout=10.0))
-    
+
     try:
         loop.add_signal_handler(signal.SIGTERM, lambda: handle_signal(signal.SIGTERM))
         loop.add_signal_handler(signal.SIGINT, lambda: handle_signal(signal.SIGINT))
@@ -177,6 +177,40 @@ def setup_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
     except NotImplementedError:
         # Windows doesn't support add_signal_handler, but we're targeting Linux VPS
         logger.warning("Signal handlers not supported on this platform")
+
+
+async def _load_autopost_subscriptions(autopost_manager) -> None:
+    """
+    Load autopost subscriptions in background without blocking bot startup.
+
+    Each channel is started with a 2-second delay to avoid API spam.
+    Failed channels don't block other channels from loading.
+    """
+    async with get_session() as session:
+        repo = AutopostSubscriptionRepository(session)
+        active_subs = await repo.get_active_subscriptions()
+
+        if not active_subs:
+            logger.info("Autopost: no active subscriptions to load")
+            return
+
+        channels_list = [f"@{s.tg_channel}" for s in active_subs]
+        logger.info(f"Autopost: loading {len(active_subs)} active subscriptions in background: {', '.join(channels_list)}")
+
+        loaded_count = 0
+        for i, sub in enumerate(active_subs):
+            # Add delay between channels to avoid API spam
+            if i > 0:
+                await asyncio.sleep(2)
+
+            try:
+                success = await autopost_manager.start_monitoring(sub)
+                if success:
+                    loaded_count += 1
+            except Exception as e:
+                logger.error(f"Failed to start autopost for @{sub.tg_channel}: {e}")
+
+        logger.info(f"Autopost: successfully loaded {loaded_count}/{len(active_subs)} subscriptions")
 
 
 async def main() -> None:
@@ -249,21 +283,10 @@ async def main() -> None:
         )
         logger.info("Webhook server started")
 
-    # Load active autopost subscriptions (only if Telethon is available)
+    # Load active autopost subscriptions in background (only if Telethon is available)
+    # This runs parallel to polling and won't block bot startup
     if autopost_manager:
-        async with get_session() as session:
-            repo = AutopostSubscriptionRepository(session)
-            active_subs = await repo.get_active_subscriptions()
-            channels_list = [f"@{s.tg_channel}" for s in active_subs]
-            logger.info(f"Autopost: loading {len(active_subs)} active subscriptions: {', '.join(channels_list)}")
-            loaded_count = 0
-            for sub in active_subs:
-                try:
-                    await autopost_manager.start_monitoring(sub)
-                    loaded_count += 1
-                except Exception as e:
-                    logger.error(f"Failed to start autopost for @{sub.tg_channel}: {e}")
-            logger.info(f"Autopost: successfully loaded {loaded_count}/{len(active_subs)} subscriptions")
+        asyncio.create_task(_load_autopost_subscriptions(autopost_manager))
     else:
         logger.info("Autopost: skipping load - Telethon unavailable")
 

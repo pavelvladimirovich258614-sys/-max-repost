@@ -215,12 +215,21 @@ class AutopostManager:
             try:
                 if tg_channel_id and tg_channel_id.lstrip('-').isdigit():
                     # Use numeric ID for private channels
-                    entity = await self.telethon_client.get_entity(int(tg_channel_id))
+                    entity = await asyncio.wait_for(
+                        self.telethon_client.get_entity(int(tg_channel_id)),
+                        timeout=30
+                    )
                     if entity:
                         logger.info(f"Using channel ID {tg_channel_id} for private channel access")
                 else:
                     # Use username for public channels
-                    entity = await self.telethon_client.get_entity(tg_channel)
+                    entity = await asyncio.wait_for(
+                        self.telethon_client.get_entity(tg_channel),
+                        timeout=30
+                    )
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout (30s) getting entity for {tg_channel}, skipping this channel")
+                return False
             except FloodWaitError as e:
                 if e.seconds > 60:
                     logger.error(f"FloodWaitError on get_entity for {tg_channel}: {e.seconds}s > 60s, skipping this channel")
@@ -228,10 +237,20 @@ class AutopostManager:
                 logger.info(f"FloodWaitError on get_entity: waiting {e.seconds}s")
                 await asyncio.sleep(e.seconds)
                 # Retry once after wait
-                if tg_channel_id and tg_channel_id.lstrip('-').isdigit():
-                    entity = await self.telethon_client.get_entity(int(tg_channel_id))
-                else:
-                    entity = await self.telethon_client.get_entity(tg_channel)
+                try:
+                    if tg_channel_id and tg_channel_id.lstrip('-').isdigit():
+                        entity = await asyncio.wait_for(
+                            self.telethon_client.get_entity(int(tg_channel_id)),
+                            timeout=30
+                        )
+                    else:
+                        entity = await asyncio.wait_for(
+                            self.telethon_client.get_entity(tg_channel),
+                            timeout=30
+                        )
+                except asyncio.TimeoutError:
+                    logger.warning(f"Timeout (30s) on retry getting entity for {tg_channel}, skipping this channel")
+                    return False
 
             if entity is None:
                 logger.warning(f"Failed to get entity for {tg_channel} - returned None (likely FloodWait)")
