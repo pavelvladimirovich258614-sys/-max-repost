@@ -213,18 +213,56 @@ async def _load_autopost_subscriptions(autopost_manager) -> None:
         logger.info(f"Autopost: successfully loaded {loaded_count}/{len(active_subs)} subscriptions")
 
 
+async def _init_telethon_and_autopost(
+    telethon_client: TelethonChannelClient,
+    max_client: MaxClient,
+    bot,
+) -> TelethonChannelClient | None:
+    """
+    Initialize Telethon client and autopost manager in background.
+
+    This runs after aiogram polling has already started, so the bot
+    remains responsive even if Telethon takes time to connect.
+
+    Args:
+        telethon_client: Telethon client instance
+        max_client: Max API client instance
+        bot: Aiogram bot instance
+
+    Returns:
+        Telethon client if successful, None if failed
+    """
+    try:
+        logger.info("Telethon: starting background initialization...")
+        await telethon_client._get_client()
+        logger.info("Telethon: connected successfully")
+    except (Exception, RuntimeError) as e:
+        logger.error(f"Telethon: failed to initialize - {e}")
+        logger.warning("Bot continues WITHOUT Telethon - autopost and transfer features disabled")
+        return None
+
+    # Telethon connected - initialize autopost
+    autopost_manager = AutopostManager(telethon_client, max_client, bot)
+    set_autopost_manager(autopost_manager)
+    logger.info("AutopostManager initialized")
+
+    # Load subscriptions in background
+    asyncio.create_task(_load_autopost_subscriptions(autopost_manager))
+
+    return telethon_client
+
+
 async def main() -> None:
     """
     Async main function - entry point for the bot application.
 
-    Initializes logging, database, creates bot and dispatcher, starts polling.
-    Also starts Max bot listener for responding to messages in Max messenger.
-    Telethon client runs in parallel for receiving channel updates.
+    CRITICAL: aiogram polling starts FIRST, before Telethon initialization.
+    This ensures bot remains responsive even if Telethon takes time to connect.
     """
     # Get the event loop and set up signal handlers early
     loop = asyncio.get_running_loop()
     setup_signal_handlers(loop)
-    
+
     # Initialize logger
     init_logger()
     logger.info("Max-Repost Bot starting...")
@@ -235,37 +273,12 @@ async def main() -> None:
     # Initialize bot and dispatcher
     bot, dp = await init_bot()
 
-    # Initialize Telethon client (for user-based MTProto operations)
-    telethon_client = TelethonChannelClient(
-        api_id=settings.telegram_api_id,
-        api_hash=settings.telegram_api_hash,
-        phone=settings.telegram_phone,
-        session_string=settings.telethon_session_string,
-    )
-
-    # Initialize and start the Telethon client
-    # This connects and starts the internal update loop
-    try:
-        await telethon_client._get_client()
-    except (Exception, RuntimeError) as e:
-        logger.error(f"Failed to start Telethon client: {e}")
-        logger.warning("Bot will continue WITHOUT Telethon - autopost and transfer features will NOT work")
-        telethon_client = None
-    
+    # Initialize Max API client (needed for autopost)
     max_client = MaxClient(settings.max_access_token)
-
-    # Only initialize autopost if Telethon is available
-    autopost_manager = None
-    if telethon_client:
-        autopost_manager = AutopostManager(telethon_client, max_client, bot)
-        set_autopost_manager(autopost_manager)
-        logger.info("AutopostManager initialized")
-    else:
-        logger.warning("AutopostManager NOT initialized - Telethon unavailable")
 
     # Initialize YooKassa client
     yookassa_client = YooKassaClient()
-    
+
     # Start payment checker background task
     payment_checker_task = asyncio.create_task(
         check_pending_payments(yookassa_client, bot)
@@ -283,39 +296,68 @@ async def main() -> None:
         )
         logger.info("Webhook server started")
 
-    # Load active autopost subscriptions in background (only if Telethon is available)
-    # This runs parallel to polling and won't block bot startup
-    if autopost_manager:
-        asyncio.create_task(_load_autopost_subscriptions(autopost_manager))
-    else:
-        logger.info("Autopost: skipping load - Telethon unavailable")
-
     # Start Max bot listener (responds to messages in Max messenger)
     max_listener = MaxBotListener(settings.max_access_token)
     listener_task = asyncio.create_task(max_listener.start())
     logger.info("Max bot listener started")
+
+    # ============================================================
+    # CRITICAL: Start aiogram polling FIRST - bot becomes responsive
+    # ============================================================
+    polling_task = asyncio.create_task(
+        dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types(),
+        )
+    )
+    logger.info("Aiogram polling started - bot is now responsive")
+
+    # ============================================================
+    # Initialize Telethon in BACKGROUND (after polling started)
+    # ============================================================
+    telethon_client = TelethonChannelClient(
+        api_id=settings.telegram_api_id,
+        api_hash=settings.telegram_api_hash,
+        phone=settings.telegram_phone,
+        session_string=settings.telethon_session_string,
+    )
+
+    # Start Telethon initialization in background - doesn't block polling
+    telethon_task = asyncio.create_task(
+        _init_telethon_and_autopost(telethon_client, max_client, bot)
+    )
 
     # Store tasks for cleanup
     all_tasks = [payment_checker_task, listener_task]
     if webhook_task:
         all_tasks.append(webhook_task)
 
-    # Start polling and Telethon event loop in parallel
+    # ============================================================
+    # Main loop: wait for polling task
+    # ============================================================
+    telethon_connected = None
+
     try:
-        if telethon_client:
+        # Wait a bit for Telethon to initialize (non-blocking)
+        try:
+            telethon_connected = await asyncio.wait_for(telethon_task, timeout=5.0)
+            if telethon_connected:
+                logger.info("Telethon connected, bot has full functionality")
+        except asyncio.TimeoutError:
+            logger.info("Telethon still connecting in background...")
+
+        # Main loop - wait for polling (or polling + telethon)
+        if telethon_connected:
+            # Both polling and Telethon running - wait for both
             await asyncio.gather(
-                dp.start_polling(
-                    bot,
-                    allowed_updates=dp.resolve_used_update_types(),
-                ),
-                telethon_client.run_until_disconnected(),
+                polling_task,
+                telethon_connected.run_until_disconnected(),
             )
         else:
-            logger.warning("Starting bot WITHOUT Telethon - only aiogram polling")
-            await dp.start_polling(
-                bot,
-                allowed_updates=dp.resolve_used_update_types(),
-            )
+            # Only polling running - Telethon may still be connecting in background
+            # or failed completely
+            await polling_task
+
     except (asyncio.CancelledError, KeyboardInterrupt):
         logger.info("Received shutdown signal")
     except Exception as e:
@@ -323,14 +365,18 @@ async def main() -> None:
     finally:
         # Graceful shutdown
         logger.info("Shutting down...")
-        
+
+        # Get autopost manager for cleanup (may be None if Telethon failed)
+        from bot.core.autopost import get_autopost_manager
+        autopost_manager = get_autopost_manager()
+
         # Stop all autopost tasks
         if autopost_manager:
             try:
                 await asyncio.wait_for(autopost_manager.stop_all(), timeout=5.0)
             except asyncio.TimeoutError:
                 logger.warning("Autopost manager stop timed out")
-        
+
         # Stop Max listener
         try:
             await max_listener.stop()
@@ -342,7 +388,7 @@ async def main() -> None:
             pass
         except Exception as e:
             logger.error(f"Max listener task error: {e}")
-        
+
         # Cancel payment checker
         try:
             payment_checker_task.cancel()
@@ -354,7 +400,7 @@ async def main() -> None:
             pass
         except Exception as e:
             logger.error(f"Payment checker error: {e}")
-        
+
         # Cancel webhook server and cleanup runner
         if webhook_task:
             try:
@@ -370,22 +416,22 @@ async def main() -> None:
                 pass
             except Exception as e:
                 logger.error(f"Webhook server error: {e}")
-        
+
         # Close Max API client session
         try:
             await max_client.close()
             logger.debug("Max API client closed")
         except Exception as e:
             logger.error(f"Error closing Max API client: {e}")
-        
-        # Disconnect Telethon client
-        if telethon_client:
+
+        # Disconnect Telethon client (if connected)
+        if telethon_connected:
             try:
-                await telethon_client.close()
+                await telethon_connected.close()
                 logger.debug("Telethon client closed")
             except Exception as e:
                 logger.error(f"Error closing Telethon client: {e}")
-        
+
         logger.info("Max-Repost Bot stopped")
 
 
