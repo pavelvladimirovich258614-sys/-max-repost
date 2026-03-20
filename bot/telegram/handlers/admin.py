@@ -168,6 +168,7 @@ async def process_add_balance_input(
     state: FSMContext,
     user_repo: UserRepository,
     autopost_sub_repo: AutopostSubscriptionRepository,
+    session,  # Database session from middleware
 ) -> None:
     """
     Process balance top-up input.
@@ -226,7 +227,7 @@ async def process_add_balance_input(
 
     # Add balance using admin_add_balance (creates transaction record)
     new_balance = await admin_add_balance(
-        user_repo._session,
+        session,  # Use session from middleware instead of user_repo._session
         target_user_id,
         amount,
         description=f"Admin top-up by {message.from_user.id}",
