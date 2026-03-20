@@ -604,7 +604,9 @@ async def confirm_create_autopost(
         if manager:
             try:
                 client = await manager.telethon_client._get_client()
-                entity = await client.get_entity(tg_channel)
+                # Use numeric channel ID for private channels, username for public
+                entity_id = int(tg_channel_id) if (tg_channel_id and str(tg_channel_id).lstrip('-').isdigit()) else tg_channel
+                entity = await client.get_entity(entity_id)
                 # Get the latest message from the channel
                 messages = await client.get_messages(entity, limit=1)
                 if messages:

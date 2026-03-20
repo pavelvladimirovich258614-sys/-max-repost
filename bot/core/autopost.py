@@ -39,6 +39,29 @@ def get_autopost_manager() -> AutopostManager | None:
     return _autopost_manager
 
 
+def _resolve_entity_id(channel_id: str | int | None) -> str | int:
+    """
+    Convert channel identifier to proper type for Telethon.
+
+    Telethon get_entity() requires int for numeric channel IDs (like -1002443306268),
+    but string for usernames (like @channel) and invite hashes.
+
+    Args:
+        channel_id: Channel identifier (string, int, or None)
+
+    Returns:
+        int if the identifier is a numeric string, otherwise the original value
+    """
+    if channel_id is None:
+        return channel_id
+    if isinstance(channel_id, int):
+        return channel_id
+    # Check if string represents a number (including negative channel IDs)
+    if str(channel_id).lstrip('-').isdigit():
+        return int(channel_id)
+    return channel_id
+
+
 class AutopostManager:
     """
     Manages autoposting for all active channels.
@@ -207,7 +230,7 @@ class AutopostManager:
         # Get channel identifier for Telethon
         # For private channels, use tg_channel_id if available
         tg_channel_id = getattr(subscription, 'tg_channel_id', None)
-        channel_identifier = tg_channel_id if tg_channel_id else tg_channel
+        channel_identifier = _resolve_entity_id(tg_channel_id if tg_channel_id else tg_channel)
         
         try:
             # Try to get entity using channel_id (for private) or username (for public)
@@ -341,8 +364,10 @@ class AutopostManager:
                     # iter_messages with min_id returns messages with id > min_id
                     # Use channel_identifier (may be numeric ID for private channels)
                     try:
+                        # Resolve to int if numeric string for Telethon compatibility
+                        resolved_id = _resolve_entity_id(channel_identifier)
                         async for msg in await self.telethon_client.iter_messages(
-                            channel_identifier,
+                            resolved_id,
                             min_id=last_post_id,
                             limit=50,
                         ):

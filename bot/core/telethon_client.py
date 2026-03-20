@@ -306,9 +306,15 @@ class TelethonChannelClient:
         await self._get_client()
 
         try:
+            # Convert numeric string channel ID to int for Telethon
+            entity_id = channel_identifier
+            if isinstance(channel_identifier, str) and channel_identifier.lstrip('-').isdigit():
+                entity_id = int(channel_identifier)
+                logger.debug(f"Converted channel ID to int: {channel_identifier} -> {entity_id}")
+
             # get_messages with limit=0 returns only total count
             # This is efficient - doesn't fetch actual messages
-            result = await self._call_with_retry(self._client.get_messages, channel_identifier, limit=0)
+            result = await self._call_with_retry(self._client.get_messages, entity_id, limit=0)
             total = result.total
             logger.info(f"Channel {channel_identifier}: {total} posts")
             return total
@@ -347,11 +353,17 @@ class TelethonChannelClient:
         posts = []
 
         try:
+            # Convert numeric string channel ID to int for Telethon
+            entity_id = channel_identifier
+            if isinstance(channel_identifier, str) and channel_identifier.lstrip('-').isdigit():
+                entity_id = int(channel_identifier)
+                logger.debug(f"Converted channel ID to int: {channel_identifier} -> {entity_id}")
+
             # iter_messages is memory-efficient for large channels
             # Wrap iteration in lock to prevent database locked errors
             async with self._lock:
                 iterator = self._client.iter_messages(
-                    channel_identifier,
+                    entity_id,
                     limit=limit,
                     reverse=reverse,  # oldest first for transfer
                 )
@@ -403,7 +415,12 @@ class TelethonChannelClient:
             Entity object or None if FloodWait > 60s
         """
         await self._get_client()
-        result = await self._call_with_retry(self._client.get_entity, channel)
+        # Convert numeric strings to int for Telethon (e.g., "-1002443306268" -> -1002443306268)
+        entity_id = channel
+        if isinstance(channel, str) and channel.lstrip('-').isdigit():
+            entity_id = int(channel)
+            logger.debug(f"Converted channel ID to int: {channel} -> {entity_id}")
+        result = await self._call_with_retry(self._client.get_entity, entity_id)
         if result is None:
             logger.warning(f"get_entity({channel}) returned None due to FloodWait")
         return result
@@ -425,17 +442,25 @@ class TelethonChannelClient:
         """
         Get async generator for iterating over messages.
         This returns a wrapped iterator that uses the lock.
-        
+
         Returns:
             Async generator over messages
         """
         await self._get_client()
-        
+
+        # Convert numeric string channel ID to int (first arg is the channel)
+        processed_args = list(args)
+        if processed_args and isinstance(processed_args[0], str):
+            channel_arg = processed_args[0]
+            if channel_arg.lstrip('-').isdigit():
+                processed_args[0] = int(channel_arg)
+                logger.debug(f"Converted iter_messages channel ID to int: {channel_arg} -> {processed_args[0]}")
+
         async def _wrapped_iterator():
             async with self._lock:
-                async for message in self._client.iter_messages(*args, **kwargs):
+                async for message in self._client.iter_messages(*processed_args, **kwargs):
                     yield message
-        
+
         return _wrapped_iterator()
 
 
