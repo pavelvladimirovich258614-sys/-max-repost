@@ -16,9 +16,10 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="📊 Статистика", callback_data="admin_stats")
     builder.button(text="👥 Пользователи", callback_data="admin_users")
     builder.button(text="💰 Финансы", callback_data="admin_finance")
+    builder.button(text="💳 Начислить баланс", callback_data="admin_add_balance")
     builder.button(text="← Назад", callback_data="nav_goto_menu")
 
-    builder.adjust(2, 1, 1)
+    builder.adjust(2, 2, 1)
     return builder.as_markup()
 
 

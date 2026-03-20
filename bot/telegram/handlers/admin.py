@@ -13,10 +13,12 @@ from bot.telegram.keyboards.admin import (
     admin_finance_keyboard,
 )
 from bot.telegram.keyboards.main import menu_keyboard
+from bot.telegram.states import AdminStates
 from bot.database.repositories.user import UserRepository
 from bot.database.repositories.autopost_subscription import AutopostSubscriptionRepository
 from bot.database.repositories.transferred_post import TransferredPostRepository
 from bot.database.repositories.yookassa_payment import YooKassaPaymentRepository
+from bot.database.balance import admin_add_balance
 from config.settings import settings
 
 # Create router
@@ -73,6 +75,31 @@ async def cmd_admin(
     )
 
 
+@admin_router.message(Command("addbalance"))
+async def cmd_addbalance(message: Message) -> None:
+    """
+    Handle /addbalance command.
+
+    Prompts admin for user_id and amount.
+
+    Args:
+        message: Telegram message
+    """
+    # Check admin rights
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет прав для этой команды.")
+        return
+
+    await message.answer(
+        "💳 <b>Начисление баланса</b>\n\n"
+        "Введите <code>telegram_id</code> и сумму через пробел.\n\n"
+        "Пример: <code>7707646318 50</code>\n\n"
+        "Для отмены введите /cancel",
+        parse_mode="HTML",
+    )
+    await AdminStates.waiting_add_balance_input.set()
+
+
 # =============================================================================
 # Main Admin Menu Callbacks
 # =============================================================================
@@ -100,6 +127,142 @@ async def callback_admin_main(callback: CallbackQuery) -> None:
         parse_mode="HTML",
         reply_markup=admin_main_keyboard(),
     )
+
+
+@admin_router.callback_query(lambda c: c.data == "admin_add_balance")
+async def callback_admin_add_balance(callback: CallbackQuery) -> None:
+    """
+    Handle 'Add Balance' callback from admin panel.
+
+    Prompts for user_id and amount.
+    """
+    # Check admin rights
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен", show_alert=True)
+        return
+
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
+    await callback.message.edit_text(
+        "💳 <b>Начисление баланса</b>\n\n"
+        "Введите <code>telegram_id</code> и сумму через пробел.\n\n"
+        "Пример: <code>7707646318 50</code>\n\n"
+        "Для отмены введите /cancel",
+        parse_mode="HTML",
+    )
+    await AdminStates.waiting_add_balance_input.set()
+
+
+@admin_router.message(AdminStates.waiting_add_balance_input)
+async def process_add_balance_input(
+    message: Message,
+    user_repo: UserRepository,
+    autopost_sub_repo: AutopostSubscriptionRepository,
+) -> None:
+    """
+    Process balance top-up input.
+
+    Expects format: "telegram_id amount"
+
+    Args:
+        message: Telegram message
+        user_repo: User repository
+        autopost_sub_repo: Autopost subscription repository
+    """
+    # Check admin rights
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет прав для этой команды.")
+        await AdminStates.waiting_add_balance_input.reset()
+        return
+
+    text = message.text.strip()
+
+    # Try to parse "user_id amount"
+    parts = text.split()
+    if len(parts) != 2:
+        await message.answer(
+            "❌ Неверный формат. Введите два числа через пробел:\n"
+            "<code>telegram_id сумма</code>\n\n"
+            "Пример: <code>7707646318 50</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        target_user_id = int(parts[0])
+        amount = int(parts[1])
+    except ValueError:
+        await message.answer(
+            "❌ Неверный формат. telegram_id и сумма должны быть числами.\n\n"
+            "Пример: <code>7707646318 50</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    if amount <= 0:
+        await message.answer("❌ Сумма должна быть положительным числом.")
+        return
+
+    # Check if target user exists
+    target_user = await user_repo.get_by_telegram_id(target_user_id)
+    if target_user is None:
+        await message.answer(f"❌ Пользователь с telegram_id={target_user_id} не найден.")
+        await AdminStates.waiting_add_balance_input.reset()
+        return
+
+    # Get old balance
+    old_balance = int(target_user.balance)
+
+    # Add balance using admin_add_balance (creates transaction record)
+    new_balance = await admin_add_balance(
+        user_repo._session,
+        target_user_id,
+        amount,
+        description=f"Admin top-up by {message.from_user.id}",
+    )
+
+    if new_balance is None:
+        await message.answer("❌ Ошибка при начислении баланса.")
+        await AdminStates.waiting_add_balance_input.reset()
+        return
+
+    # Check if user has paused subscriptions due to insufficient funds and resume them
+    paused_subs = await autopost_sub_repo.get_user_subscriptions(target_user_id)
+    resumed_count = 0
+    for sub in paused_subs:
+        if sub.paused_reason == "insufficient_funds":
+            await autopost_sub_repo.resume_subscription(sub.id)
+            resumed_count += 1
+            logger.info(f"Resumed autopost subscription {sub.id} for user {target_user_id} after balance top-up")
+
+    # Build response message
+    response = (
+        f"✅ Начислено {amount}₽ пользователю {target_user_id}\n"
+        f"💰 Баланс: {old_balance}₽ → {new_balance}₽"
+    )
+
+    if resumed_count > 0:
+        response += f"\n\n🔄 Возобновлено подписок: {resumed_count}"
+
+    await message.answer(
+        response,
+        reply_markup=admin_main_keyboard(),
+    )
+    await AdminStates.waiting_add_balance_input.reset()
+
+    # Notify user about balance top-up
+    try:
+        await message.bot.send_message(
+            target_user_id,
+            f"💰 Вам начислено {amount}₽!\n"
+            f"Текущий баланс: {new_balance}₽\n\n"
+            f"Автоподписки возобновлены."
+        )
+    except Exception as e:
+        logger.warning(f"Could not notify user {target_user_id} about balance top-up: {e}")
 
 
 # =============================================================================

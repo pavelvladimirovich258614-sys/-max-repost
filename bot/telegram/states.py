@@ -34,3 +34,9 @@ class ChannelStates(StatesGroup):
     viewing_channel = State()  # Viewing channel details
     confirm_delete = State()  # Confirming channel deletion
     custom_post_count = State()  # Entering custom post count for transfer
+
+
+class AdminStates(StatesGroup):
+    """States for admin operations."""
+
+    waiting_add_balance_input = State()  # Waiting for user_id and amount for balance top-up

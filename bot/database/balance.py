@@ -167,21 +167,21 @@ async def get_autopost_stats(
     tg_channel: str
 ) -> dict | None:
     """Get autopost statistics for user and channel.
-    
+
     Args:
         session: Database session
         user_id: Telegram user ID
         tg_channel: Telegram channel username
-        
+
     Returns:
         Dict with stats or None if no subscription
     """
     sub_repo = AutopostSubscriptionRepository(session)
     subscription = await sub_repo.get_by_channel(user_id, tg_channel)
-    
+
     if subscription is None:
         return None
-    
+
     return {
         "is_active": subscription.is_active,
         "posts_transferred": subscription.posts_transferred,
@@ -190,3 +190,54 @@ async def get_autopost_stats(
         "last_post_id": subscription.last_post_id,
         "created_at": subscription.created_at,
     }
+
+
+async def admin_add_balance(
+    session: AsyncSession,
+    user_id: int,
+    amount: int,
+    description: str | None = None
+) -> int | None:
+    """Add balance to user by admin (creates transaction record).
+
+    Args:
+        session: Database session
+        user_id: Telegram user ID
+        amount: Amount to add (in posts, 1 ruble = 1 post)
+        description: Optional description for the transaction
+
+    Returns:
+        New balance in posts, or None if user not found
+    """
+    user_repo = UserRepository(session)
+    user = await user_repo.get_by_telegram_id(user_id)
+
+    if user is None:
+        logger.warning(f"Admin add balance failed: user {user_id} not found")
+        return None
+
+    # Update user balance
+    result = await user_repo.add_balance(user_id, amount)
+    if result is None:
+        logger.error(f"Admin add balance failed: could not update balance for user {user_id}")
+        return None
+
+    new_balance = result.balance
+
+    # Create transaction record
+    if description is None:
+        description = f"Admin top-up of {amount} posts"
+    transaction = BalanceTransaction(
+        user_id=user_id,
+        amount=Decimal(amount),
+        transaction_type="admin_topup",
+        description=description,
+    )
+    session.add(transaction)
+
+    logger.info(
+        f"Admin added {amount} posts to user {user_id}. "
+        f"New balance: {new_balance}"
+    )
+
+    return new_balance
