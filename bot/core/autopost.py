@@ -28,6 +28,11 @@ from config.settings import settings
 _autopost_manager: AutopostManager | None = None
 
 
+class InsufficientFundsError(Exception):
+    """Raised when user has insufficient funds for autopost."""
+    pass
+
+
 def set_autopost_manager(manager: AutopostManager) -> None:
     """Set the global autopost manager singleton instance."""
     global _autopost_manager
@@ -457,7 +462,7 @@ class AutopostManager:
                                 f"Autopost: processing post in @{tg_channel}, "
                                 f"id={msg.id}, text={msg.text[:50] if msg.text else '[media]'!r}"
                             )
-                            
+
                             # Check if message is part of an album
                             if msg.grouped_id:
                                 # Add to album buffer - it will be processed when buffer is flushed
@@ -467,31 +472,51 @@ class AutopostManager:
                                 # Update tracking but don't process individually
                                 last_post_id = msg.id
                                 processed_ids.add(msg.id)
-                                
+
                                 # Limit the size of processed_ids set to prevent memory growth
                                 if len(processed_ids) > 1000:
                                     processed_ids = set(sorted(processed_ids)[-500:])
-                                
+
                                 if subscription_id:
                                     await self._update_last_post_id(subscription_id, last_post_id)
                                 continue
-                            
+
                             # Forward single (non-album) post
-                            success = await self._forward_post(
-                                msg, max_chat_id, user_id, tg_channel, subscription
-                            )
-                            
-                            # Update last_post_id and track processed IDs on success
-                            if success:
-                                last_post_id = msg.id
-                                processed_ids.add(msg.id)
-                                
-                                # Limit the size of processed_ids set to prevent memory growth
-                                if len(processed_ids) > 1000:
-                                    processed_ids = set(sorted(processed_ids)[-500:])
-                                
+                            try:
+                                success = await self._forward_post(
+                                    msg, max_chat_id, user_id, tg_channel, subscription
+                                )
+
+                                # Update last_post_id and track processed IDs on success
+                                if success:
+                                    last_post_id = msg.id
+                                    processed_ids.add(msg.id)
+
+                                    # Limit the size of processed_ids set to prevent memory growth
+                                    if len(processed_ids) > 1000:
+                                        processed_ids = set(sorted(processed_ids)[-500:])
+
+                                    if subscription_id:
+                                        await self._update_last_post_id(subscription_id, last_post_id)
+
+                            except InsufficientFundsError:
+                                # CRITICAL: User has insufficient funds
+                                # Update last_post_id to the last SUCCESSFULLY processed message
+                                # NOT the current one (which failed due to insufficient funds)
+                                logger.warning(
+                                    f"Autopost: insufficient funds for @{tg_channel}, "
+                                    f"stopping polling. last_post_id stays at {last_post_id}"
+                                )
+
+                                # Update last_post_id in DB one final time
                                 if subscription_id:
                                     await self._update_last_post_id(subscription_id, last_post_id)
+
+                                # Stop polling for this channel
+                                # Don't process remaining messages in new_messages
+                                # The subscription is already paused by _forward_post
+                                logger.info(f"Autopost: polling stopped due to insufficient funds: @{tg_channel}")
+                                return  # Exit the polling function entirely
                     
                     # Wait before next poll
                     await asyncio.sleep(self.POLL_INTERVAL)
@@ -593,20 +618,20 @@ class AutopostManager:
     async def _flush_album_buffer(self, grouped_id: str) -> None:
         """
         Flush an album buffer and forward all messages as a group.
-        
+
         Args:
             grouped_id: The grouped_id of the album to flush
         """
         if grouped_id not in self._album_buffer:
             return
-        
+
         buffer_data = self._album_buffer.pop(grouped_id)
         messages = buffer_data["messages"]
         max_chat_id = buffer_data["max_chat_id"]
         user_id = buffer_data["user_id"]
         tg_channel = buffer_data["tg_channel"]
         subscription = buffer_data["subscription"]
-        
+
         # Cancel timer task if it's still running
         timer_task = buffer_data.get("timer_task")
         if timer_task and not timer_task.done():
@@ -615,22 +640,30 @@ class AutopostManager:
                 await timer_task
             except asyncio.CancelledError:
                 pass
-        
+
         if not messages:
             return
-        
+
         # Sort messages by ID to maintain order
         messages.sort(key=lambda m: m.id)
-        
+
         logger.info(
             f"Flushing album buffer: grouped_id={grouped_id}, "
             f"{len(messages)} messages, channel=@{tg_channel}"
         )
-        
+
         # Forward the album as a group
-        await self._forward_album(
-            messages, max_chat_id, user_id, tg_channel, subscription
-        )
+        try:
+            await self._forward_album(
+                messages, max_chat_id, user_id, tg_channel, subscription
+            )
+        except InsufficientFundsError:
+            # Album transfer failed due to insufficient funds
+            # The subscription is already paused by _forward_album
+            # The polling task will stop on its own when it checks is_active
+            logger.warning(f"Album flush aborted due to insufficient funds: @{tg_channel}")
+        except Exception as e:
+            logger.error(f"Failed to flush album buffer: {e}")
     
     async def _forward_album(
         self,
@@ -642,33 +675,59 @@ class AutopostManager:
     ) -> bool:
         """
         Forward an album (group of media messages) to Max.
-        
+
+        IMPORTANT: Charging happens AFTER successful transfer, not before.
+
         Args:
             messages: List of Telethon Message objects belonging to the album
             max_chat_id: Max channel chat_id
             user_id: Telegram user ID
             tg_channel: Telegram channel username
             subscription: Optional AutopostSubscription object
-            
+
         Returns:
             True if forwarded successfully, False otherwise
+
+        Raises:
+            InsufficientFundsError: When user has insufficient funds (before transfer attempt)
         """
         if not messages:
             return True
-        
+
         # Use the first message for text/caption and skip checks
         first_message = messages[0]
-        
+
         # 1. Filter service and empty messages
         should_skip, skip_reason = self._should_skip_autopost(first_message)
         if should_skip:
             logger.info(f"Autopost: @{tg_channel} album skipped - {skip_reason}")
             return True
-        
+
         # 2. Check if user is admin (admins have unlimited access)
         is_admin = user_id in settings.ADMIN_IDS
-        
-        # 3. If not admin - check and charge balance (charge once for the album)
+
+        # 3. If not admin - CHECK balance first (but don't charge yet!)
+        if not is_admin:
+            async with get_session() as session:
+                balance_repo = UserBalanceRepository(session)
+                current_balance = await balance_repo.get_balance(user_id)
+
+                # Convert to int for comparison (balance is in posts, 3 RUB = 3 posts)
+                balance_int = int(current_balance)
+                if balance_int < 3:  # Cost per post (album counts as 1 post)
+                    logger.warning(f"Insufficient funds for user {user_id}: balance={balance_int}")
+                    await self._notify_insufficient_funds(user_id, tg_channel)
+                    await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
+                    raise InsufficientFundsError(f"User {user_id} has insufficient balance: {balance_int}")
+
+        # 4. Forward the album FIRST (before charging)
+        try:
+            await self._do_forward_album(messages, max_chat_id)
+        except Exception as e:
+            logger.error(f"Autopost: failed to forward album from @{tg_channel}: {e}")
+            return False
+
+        # 5. ONLY NOW charge the user (AFTER successful transfer)
         if not is_admin:
             async with get_session() as session:
                 success, error = await charge_autopost_with_subscription(
@@ -678,22 +737,13 @@ class AutopostManager:
                     post_id=first_message.id
                 )
                 if not success:
-                    if error == "insufficient_funds":
-                        await self._notify_insufficient_funds(user_id, tg_channel)
-                        await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
-                    return False
-                
+                    logger.error(f"Failed to charge for album {first_message.id}: {error}")
+                    # Transfer succeeded but charging failed - still log success
+
                 # Check for low balance after successful charge
                 await self._check_and_notify_low_balance(user_id)
-        
-        # 4. Forward the album
-        try:
-            await self._do_forward_album(messages, max_chat_id)
-        except Exception as e:
-            logger.error(f"Autopost: failed to forward album from @{tg_channel}: {e}")
-            return False
-        
-        # 5. Log success
+
+        # 6. Log success
         logger.info(f"Autopost: @{tg_channel} album with {len(messages)} parts transferred")
         return True
     
@@ -1012,33 +1062,26 @@ class AutopostManager:
                         processed_grouped_ids.add(grouped_id)
                         continue
                     
-                    # Check balance if not admin (charge once per album)
+                    # Check balance if not admin (check only, don't charge yet!)
                     if not is_admin:
                         async with get_session() as session:
-                            success, error = await charge_autopost_with_subscription(
-                                session=session,
-                                user_id=user_id,
-                                tg_channel=tg_channel,
-                                post_id=album_messages[0].id
-                            )
-                            if not success:
-                                if error == "insufficient_funds":
-                                    await self._notify_insufficient_funds(user_id, tg_channel)
-                                    await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
-                                logger.warning(f"Catch-up: failed to charge for album {album_messages[0].id}, stopping")
+                            balance_repo = UserBalanceRepository(session)
+                            current_balance = await balance_repo.get_balance(user_id)
+                            balance_int = int(current_balance)
+                            if balance_int < 3:
+                                logger.warning(f"Catch-up: insufficient funds for user {user_id}: balance={balance_int}")
+                                await self._notify_insufficient_funds(user_id, tg_channel)
+                                await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
                                 # Update last_post_id before stopping
                                 for album_msg in album_messages:
                                     new_last_post_id = album_msg.id
                                 return new_last_post_id
-                            
-                            # Check for low balance after successful charge
-                            await self._check_and_notify_low_balance(user_id)
-                    
-                    # Forward the album
+
+                    # Forward the album FIRST
                     try:
                         await self._do_forward_album(album_messages, max_chat_id)
                         transferred_count += 1
-                        
+
                         # Update last_post_id for all album parts
                         for album_msg in album_messages:
                             new_last_post_id = album_msg.id
@@ -1046,6 +1089,20 @@ class AutopostManager:
                                 async with get_session() as session:
                                     repo = AutopostSubscriptionRepository(session)
                                     await repo.update_last_post_id(subscription_id, album_msg.id)
+
+                        # NOW charge AFTER successful transfer
+                        if not is_admin:
+                            async with get_session() as session:
+                                success, error = await charge_autopost_with_subscription(
+                                    session=session,
+                                    user_id=user_id,
+                                    tg_channel=tg_channel,
+                                    post_id=album_messages[0].id
+                                )
+                                if not success:
+                                    logger.error(f"Catch-up: failed to charge for album {album_messages[0].id}: {error}")
+                                await self._check_and_notify_low_balance(user_id)
+
                     except Exception as e:
                         logger.error(f"Catch-up: failed to forward album with message {message.id}: {e}")
                         # Continue processing other messages
@@ -1065,40 +1122,47 @@ class AutopostManager:
                             await repo.update_last_post_id(subscription_id, message.id)
                     continue
                 
-                # Check balance if not admin
+                # Check balance if not admin (check only, don't charge yet!)
                 if not is_admin:
                     async with get_session() as session:
-                        success, error = await charge_autopost_with_subscription(
-                            session=session,
-                            user_id=user_id,
-                            tg_channel=tg_channel,
-                            post_id=message.id
-                        )
-                        if not success:
-                            if error == "insufficient_funds":
-                                await self._notify_insufficient_funds(user_id, tg_channel)
-                                await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
-                            logger.warning(f"Catch-up: failed to charge for message {message.id}, stopping")
+                        balance_repo = UserBalanceRepository(session)
+                        current_balance = await balance_repo.get_balance(user_id)
+                        balance_int = int(current_balance)
+                        if balance_int < 3:
+                            logger.warning(f"Catch-up: insufficient funds for user {user_id}: balance={balance_int}")
+                            await self._notify_insufficient_funds(user_id, tg_channel)
+                            await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
                             return new_last_post_id
-                        
-                        # Check for low balance after successful charge
-                        await self._check_and_notify_low_balance(user_id)
-                
-                # Forward the post
+
+                # Forward the post FIRST
                 try:
                     await self._do_forward(message, max_chat_id)
                     transferred_count += 1
                     new_last_post_id = message.id
-                    
+
                     # Update last_post_id in database
                     if subscription_id:
                         async with get_session() as session:
                             repo = AutopostSubscriptionRepository(session)
                             await repo.update_last_post_id(subscription_id, message.id)
+
+                    # NOW charge AFTER successful transfer
+                    if not is_admin:
+                        async with get_session() as session:
+                            success, error = await charge_autopost_with_subscription(
+                                session=session,
+                                user_id=user_id,
+                                tg_channel=tg_channel,
+                                post_id=message.id
+                            )
+                            if not success:
+                                logger.error(f"Catch-up: failed to charge for message {message.id}: {error}")
+                            await self._check_and_notify_low_balance(user_id)
+
                 except Exception as e:
                     logger.error(f"Catch-up: failed to forward message {message.id}: {e}")
                     continue
-            
+
             logger.info(f"Catch-up: transferred {transferred_count} missed posts for @{tg_channel}")
             return new_last_post_id
         else:
@@ -1178,39 +1242,67 @@ class AutopostManager:
             await self._flush_album_buffer(grouped_id)
     
     async def _forward_post(
-        self, 
-        message: Message, 
-        max_chat_id: int, 
-        user_id: int, 
+        self,
+        message: Message,
+        max_chat_id: int,
+        user_id: int,
         tg_channel: str,
         subscription: object | None = None,
     ) -> bool:
         """
         Forward a single post to Max with balance check.
-        
+
+        IMPORTANT: Charging happens AFTER successful transfer, not before.
+
         Args:
             message: Telethon Message object
             max_chat_id: Max channel chat_id
             user_id: Telegram user ID
             tg_channel: Telegram channel username
             subscription: Optional AutopostSubscription object to update last_post_id
-            
+
         Returns:
             True if forwarded successfully, False otherwise
+
+        Raises:
+            InsufficientFundsError: When user has insufficient funds (before transfer attempt)
         """
         # Log new message received
         logger.info(f"Autopost: new message in @{tg_channel}, id={message.id}")
-        
+
         # 1. Filter service and empty messages
         should_skip, skip_reason = self._should_skip_autopost(message)
         if should_skip:
             logger.info(f"Autopost: @{tg_channel} post #{message.id} skipped - {skip_reason}")
             return True  # Return True so we don't retry
-        
+
         # 2. Check if user is admin (admins have unlimited access)
         is_admin = user_id in settings.ADMIN_IDS
-        
-        # 3. If not admin - check and charge balance
+
+        # 3. If not admin - CHECK balance first (but don't charge yet!)
+        if not is_admin:
+            async with get_session() as session:
+                # Check if user has enough balance BEFORE attempting transfer
+                # This prevents failed transfers after spending the last credits
+                balance_repo = UserBalanceRepository(session)
+                current_balance = await balance_repo.get_balance(user_id)
+
+                # Convert to int for comparison (balance is in posts, 3 RUB = 3 posts)
+                balance_int = int(current_balance)
+                if balance_int < 3:  # Cost per post
+                    logger.warning(f"Insufficient funds for user {user_id}: balance={balance_int}")
+                    await self._notify_insufficient_funds(user_id, tg_channel)
+                    await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
+                    raise InsufficientFundsError(f"User {user_id} has insufficient balance: {balance_int}")
+
+        # 4. Forward the post FIRST (before charging)
+        try:
+            await self._do_forward(message, max_chat_id)
+        except Exception as e:
+            logger.error(f"Autopost: failed to forward post #{message.id}: {e}")
+            return False
+
+        # 5. ONLY NOW charge the user (AFTER successful transfer)
         if not is_admin:
             async with get_session() as session:
                 success, error = await charge_autopost_with_subscription(
@@ -1220,23 +1312,14 @@ class AutopostManager:
                     post_id=message.id
                 )
                 if not success:
-                    # Insufficient funds - pause autoposting
-                    if error == "insufficient_funds":
-                        await self._notify_insufficient_funds(user_id, tg_channel)
-                        await self.pause_subscription(user_id, tg_channel, "insufficient_funds")
-                    return False
-                
+                    logger.error(f"Failed to charge for post #{message.id}: {error}")
+                    # Transfer succeeded but charging failed - still log success
+                    # The post was transferred, so we should continue
+
                 # Check for low balance after successful charge
                 await self._check_and_notify_low_balance(user_id)
-        
-        # 4. Forward the post
-        try:
-            await self._do_forward(message, max_chat_id)
-        except Exception as e:
-            logger.error(f"Autopost: failed to forward post #{message.id}: {e}")
-            return False
-        
-        # 5. Log success
+
+        # 6. Log success
         logger.info(f"Autopost: @{tg_channel} post #{message.id} transferred")
         return True
     
