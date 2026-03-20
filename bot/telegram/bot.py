@@ -2,6 +2,7 @@
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
@@ -27,9 +28,13 @@ def create_bot() -> Bot:
     Returns:
         Configured Bot instance
     """
+    # Create session with SOCKS5 proxy support
+    session = AiohttpSession(proxy=settings.socks_proxy)
+
     return Bot(
         token=settings.telegram_bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        session=session,
     )
 
 
@@ -66,17 +71,18 @@ def setup_dispatcher(bot: Bot) -> Dispatcher:
         """Log bot startup and initialize autopost manager."""
         bot_user = await bot.get_me()
         print(f"Bot started: @{bot_user.username} (ID: {bot_user.id})")
-        
+
         # Initialize AutopostManager
         telethon = get_telethon_client(
             api_id=settings.telegram_api_id,
             api_hash=settings.telegram_api_hash,
             phone=settings.telegram_phone,
             session_string=settings.telethon_session_string,
+            proxy_url=settings.socks_proxy,
         )
         max_client = MaxClient()
         autopost_manager = AutopostManager(telethon, max_client)
-        
+
         # Store in dispatcher workflow_data for access in handlers
         dp.workflow_data["autopost_manager"] = autopost_manager
         print("Autopost manager initialized")

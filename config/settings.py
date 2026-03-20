@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     webhook_port: int = Field(default=8080, alias="WEBHOOK_PORT")
     yookassa_webhook_url: str = Field(default="", alias="YOOKASSA_WEBHOOK_URL")
 
+    # SOCKS5 Proxy (for blocked Telegram access)
+    socks_proxy: str = Field(default="socks5://127.0.0.1:1080", alias="SOCKS_PROXY")
+
 
 # Global settings instance
 settings = Settings()

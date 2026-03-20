@@ -8,6 +8,9 @@ Run scripts/auth_telethon.py once to authorize and create the session file.
 """
 
 import asyncio
+import os
+import re
+import socks
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +21,31 @@ from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMe
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
 from loguru import logger
+
+
+def parse_proxy_url(proxy_url: str) -> tuple | None:
+    """
+    Parse SOCKS proxy URL into Telethon format.
+
+    Args:
+        proxy_url: Proxy URL (e.g., 'socks5://127.0.0.1:1080')
+
+    Returns:
+        Tuple (proxy_type, addr, port) or None if invalid format
+    """
+    if not proxy_url:
+        return None
+
+    # Parse URL format: socks5://host:port or socks4://host:port
+    match = re.match(r'socks([45])://([^:]+):(\d+)', proxy_url)
+    if not match:
+        logger.warning(f"Invalid proxy URL format: {proxy_url}")
+        return None
+
+    socks_version, host, port = match.groups()
+    proxy_type = socks.SOCKS5 if socks_version == '5' else socks.SOCKS4
+
+    return (proxy_type, host, int(port))
 
 
 # Constants
@@ -49,7 +77,7 @@ class TelethonChannelClient:
     Session is saved to file after first authorization via scripts/auth_telethon.py
     """
 
-    def __init__(self, api_id: int, api_hash: str, phone: str, session_string: str = ""):
+    def __init__(self, api_id: int, api_hash: str, phone: str, session_string: str = "", proxy_url: str = ""):
         """
         Initialize Telethon client with user credentials.
 
@@ -58,15 +86,20 @@ class TelethonChannelClient:
             api_hash: Telegram API Hash from https://my.telegram.org
             phone: Phone number for user session (e.g., +7XXXXXXXXXX)
             session_string: StringSession string (exported via scripts/export_session.py)
+            proxy_url: SOCKS proxy URL (e.g., 'socks5://127.0.0.1:1080')
         """
         self.api_id = api_id
         self.api_hash = api_hash
         self.phone = phone
         self.session_string = session_string
+        self._proxy = parse_proxy_url(proxy_url) if proxy_url else None
         self._client: Optional[TelegramClient] = None
         self._session_path = Path(SESSION_FILE + ".session")
         self._keepalive_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
+
+        if self._proxy:
+            logger.info(f"Telethon will use proxy: {proxy_url}")
 
     def _is_session_exists(self) -> bool:
         """Check if session file exists."""
@@ -107,6 +140,7 @@ class TelethonChannelClient:
                 session=session,
                 api_id=self.api_id,
                 api_hash=self.api_hash,
+                proxy=self._proxy,
             )
 
             # Start the client (connect + auth + start update loop)
@@ -409,7 +443,7 @@ class TelethonChannelClient:
 _client_instance: Optional[TelethonChannelClient] = None
 
 
-def get_telethon_client(api_id: int, api_hash: str, phone: str, session_string: str = "") -> TelethonChannelClient:
+def get_telethon_client(api_id: int, api_hash: str, phone: str, session_string: str = "", proxy_url: str = "") -> TelethonChannelClient:
     """
     Get singleton Telethon client instance.
 
@@ -418,12 +452,13 @@ def get_telethon_client(api_id: int, api_hash: str, phone: str, session_string: 
         api_hash: Telegram API Hash
         phone: Phone number for user session
         session_string: StringSession string (exported via scripts/export_session.py)
+        proxy_url: SOCKS proxy URL (e.g., 'socks5://127.0.0.1:1080')
 
     Returns:
         TelethonChannelClient instance
     """
     global _client_instance
-    # Pass session_string to constructor
+    # Pass session_string and proxy_url to constructor
     if _client_instance is None:
-        _client_instance = TelethonChannelClient(api_id, api_hash, phone, session_string)
+        _client_instance = TelethonChannelClient(api_id, api_hash, phone, session_string, proxy_url)
     return _client_instance

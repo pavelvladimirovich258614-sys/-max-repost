@@ -320,6 +320,7 @@ async def main() -> None:
         api_hash=settings.telegram_api_hash,
         phone=settings.telegram_phone,
         session_string=settings.telethon_session_string,
+        proxy_url=settings.socks_proxy,
     )
 
     # Start Telethon initialization in background - doesn't block polling
