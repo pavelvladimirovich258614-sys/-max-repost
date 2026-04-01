@@ -10,6 +10,8 @@ from bot.database.repositories.yookassa_payment import YooKassaPaymentRepository
 from bot.database.repositories.balance import UserBalanceRepository, BalanceTransactionRepository
 from bot.database.connection import get_session
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
 
 async def check_pending_payments(
     yookassa_client: YooKassaClient,
@@ -78,14 +80,17 @@ async def check_pending_payments(
                             
                             # Notify user
                             try:
+                                user_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                                    InlineKeyboardButton(text="💰 Баланс", callback_data="menu_balance")
+                                ]])
                                 await bot.send_message(
                                     payment.user_id,
                                     f"✅ <b>Оплата прошла успешно!</b>\n\n"
                                     f"Сумма: {int(payment.amount)}₽\n"
-                                    f"Баланс пополнен автоматически.",
+                                    f"Ваш баланс пополнен.",
                                     parse_mode="HTML",
+                                    reply_markup=user_kb,
                                 )
-                                logger.info(f"Auto-confirmed payment {payment.payment_id} for user {payment.user_id}")
                             except Exception as e:
                                 logger.warning(f"Could not notify user {payment.user_id}: {e}")
                         
@@ -97,16 +102,18 @@ async def check_pending_payments(
                                     try:
                                         await bot.send_message(
                                             admin_id,
-                                            f"\U0001f4b0 <b>\u041d\u043e\u0432\u0430\u044f \u043e\u043f\u043b\u0430\u0442\u0430!</b>\n\n"
+                                            f"💰 <b>Новая оплата!</b>\n\n"
                                             f"User: <code>{payment.user_id}</code>\n"
-                                            f"\u0421\u0443\u043c\u043c\u0430: {int(payment.amount)}\u20bd\n"
-                                            f"\u041f\u043b\u0430\u0442\u0451\u0436: <code>{payment.payment_id}</code>",
+                                            f"Сумма: {int(payment.amount)}₽\n"
+                                            f"Платёж: <code>{payment.payment_id}</code>",
                                             parse_mode="HTML",
                                         )
                                     except Exception:
                                         pass
                             except Exception as e:
                                 logger.warning(f"Could not notify admins: {e}")
+
+                            logger.info(f"Notifications sent for payment {payment.payment_id}, user {payment.user_id}")
 
                         elif status == "canceled":
                             await payment_repo.update_status(

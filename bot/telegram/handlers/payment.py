@@ -9,6 +9,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from loguru import logger
 
+from config.settings import settings
+
 from bot.payments.yookassa_client import YooKassaClient
 from bot.database.repositories.yookassa_payment import YooKassaPaymentRepository
 from bot.database.repositories.balance import UserBalanceRepository, BalanceTransactionRepository
@@ -378,7 +380,10 @@ async def callback_check_payment(
         if payment.status != "succeeded":
             # Update payment status
             await yookassa_payment_repo.update_status(payment_id, "succeeded")
-            
+
+            # Ensure balance record exists before updating
+            await balance_repo.get_or_create(payment.user_id)
+
             # Add balance
             await balance_repo.update_balance(
                 user_id=payment.user_id,
@@ -406,6 +411,25 @@ async def callback_check_payment(
                 parse_mode="HTML",
                 reply_markup=back_to_balance_keyboard(),
             )
+
+            # Notify admins
+            try:
+                for admin_id in settings.admin_ids:
+                    try:
+                        await callback.bot.send_message(
+                            admin_id,
+                            f"💰 <b>Новая оплата!</b>\n\n"
+                            f"User: <code>{payment.user_id}</code>\n"
+                            f"Сумма: {int(payment.amount)}₽\n"
+                            f"Платёж: <code>{payment_id}</code>",
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"Could not notify admins: {e}")
+
+            logger.info(f"Payment {payment_id} confirmed for user {payment.user_id}, amount {int(payment.amount)}₽")
         else:
             # Already processed
             await callback.answer("Оплата уже зачислена!", show_alert=True)

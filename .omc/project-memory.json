@@ -1,0 +1,292 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1775034836532,
+  "projectRoot": "D:\\Veibcode Projects\\max-repost",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Python",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "requirements.txt"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "pip",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "scripts",
+      "tests"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "alembic": {
+      "path": "alembic",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1775034836500,
+      "keyFiles": [
+        "env.py",
+        "script.py.mako",
+        "__init__.py"
+      ]
+    },
+    "bot": {
+      "path": "bot",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1775034836501,
+      "keyFiles": [
+        "main.py",
+        "__init__.py"
+      ]
+    },
+    "config": {
+      "path": "config",
+      "purpose": "Configuration files",
+      "fileCount": 2,
+      "lastAccessed": 1775034836501,
+      "keyFiles": [
+        "settings.py",
+        "__init__.py"
+      ]
+    },
+    "data": {
+      "path": "data",
+      "purpose": "Data files",
+      "fileCount": 1,
+      "lastAccessed": 1775034836502,
+      "keyFiles": [
+        "bot.db"
+      ]
+    },
+    "docker": {
+      "path": "docker",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1775034836505,
+      "keyFiles": [
+        "docker-compose.yml",
+        "Dockerfile",
+        "max-repost.service"
+      ]
+    },
+    "logs": {
+      "path": "logs",
+      "purpose": null,
+      "fileCount": 62,
+      "lastAccessed": 1775034836506,
+      "keyFiles": [
+        "bot.log",
+        "bot_2026-03-15_22-07-06_334233.log",
+        "bot_2026-03-15_22-53-24_605603.log",
+        "bot_2026-03-15_23-09-15_247208.log",
+        "bot_2026-03-15_23-32-34_433536.log"
+      ]
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 8,
+      "lastAccessed": 1775034836510,
+      "keyFiles": [
+        "auth_telethon.py",
+        "export_session.py",
+        "find_chat_id.py",
+        "get_max_chat_id.py",
+        "inspect_posts.py"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 1,
+      "lastAccessed": 1775034836510,
+      "keyFiles": [
+        "__init__.py"
+      ]
+    },
+    "bot\\services": {
+      "path": "bot\\services",
+      "purpose": "Business logic services",
+      "fileCount": 2,
+      "lastAccessed": 1775034836514,
+      "keyFiles": [
+        "payment.py",
+        "__init__.py"
+      ]
+    },
+    "bot\\utils": {
+      "path": "bot\\utils",
+      "purpose": "Utility functions",
+      "fileCount": 2,
+      "lastAccessed": 1775034836515,
+      "keyFiles": [
+        "logger.py",
+        "__init__.py"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "bot\\payments\\payment_checker.py",
+      "accessCount": 6,
+      "lastAccessed": 1775036676428,
+      "type": "file"
+    },
+    {
+      "path": "bot\\payments\\webhook_server.py",
+      "accessCount": 5,
+      "lastAccessed": 1775036609278,
+      "type": "file"
+    },
+    {
+      "path": "bot\\telegram\\handlers\\payment.py",
+      "accessCount": 5,
+      "lastAccessed": 1775036687368,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 4,
+      "lastAccessed": 1775035225895,
+      "type": "directory"
+    },
+    {
+      "path": "CLAUDE.md",
+      "accessCount": 2,
+      "lastAccessed": 1775035416885,
+      "type": "file"
+    },
+    {
+      "path": "bot\\main.py",
+      "accessCount": 2,
+      "lastAccessed": 1775035669973,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 1,
+      "lastAccessed": 1775035189799,
+      "type": "file"
+    },
+    {
+      "path": "config\\settings.py",
+      "accessCount": 1,
+      "lastAccessed": 1775035191253,
+      "type": "file"
+    },
+    {
+      "path": "bot\\telegram\\states.py",
+      "accessCount": 1,
+      "lastAccessed": 1775035191908,
+      "type": "file"
+    },
+    {
+      "path": "bot\\telegram\\bot.py",
+      "accessCount": 1,
+      "lastAccessed": 1775035204230,
+      "type": "file"
+    },
+    {
+      "path": "bot\\database\\models.py",
+      "accessCount": 1,
+      "lastAccessed": 1775035204687,
+      "type": "file"
+    },
+    {
+      "path": "bot\\database\\connection.py",
+      "accessCount": 1,
+      "lastAccessed": 1775035205171,
+      "type": "file"
+    },
+    {
+      "path": "bot\\database\\repositories\\base.py",
+      "accessCount": 1,
+      "lastAccessed": 1775035206209,
+      "type": "file"
+    },
+    {
+      "path": "bot\\telegram\\middlewares\\db.py",
+      "accessCount": 1,
+      "lastAccessed": 1775035226827,
+      "type": "file"
+    },
+    {
+      "path": "bot\\core\\content_filter.py",
+      "accessCount": 1,
+      "lastAccessed": 1775035227686,
+      "type": "file"
+    },
+    {
+      "path": ".env.example",
+      "accessCount": 1,
+      "lastAccessed": 1775035238827,
+      "type": "file"
+    },
+    {
+      "path": "bot\\database\\__init__.py",
+      "accessCount": 1,
+      "lastAccessed": 1775035240662,
+      "type": "file"
+    },
+    {
+      "path": "bot\\telegram\\keyboards\\autopost.py",
+      "accessCount": 1,
+      "lastAccessed": 1775035668486,
+      "type": "file"
+    },
+    {
+      "path": "bot\\database\\repositories\\user.py",
+      "accessCount": 1,
+      "lastAccessed": 1775035669402,
+      "type": "file"
+    },
+    {
+      "path": "AUDIT_REPORT.md",
+      "accessCount": 1,
+      "lastAccessed": 1775036205857,
+      "type": "file"
+    },
+    {
+      "path": "PATCH_REPORT.md",
+      "accessCount": 1,
+      "lastAccessed": 1775036276025,
+      "type": "file"
+    },
+    {
+      "path": "NOTIFY_REPORT.md",
+      "accessCount": 1,
+      "lastAccessed": 1775036715553,
+      "type": "file"
+    },
+    {
+      "path": "FINAL_REPORT.md",
+      "accessCount": 1,
+      "lastAccessed": 1775036768158,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}
