@@ -292,6 +292,7 @@ async def main() -> None:
             start_webhook_server(
                 host=settings.webhook_host,
                 port=settings.webhook_port,
+                bot=bot,
             )
         )
         logger.info("Webhook server started")

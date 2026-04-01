@@ -305,12 +305,17 @@ class UserRepository(BaseRepository[User]):
         Returns:
             Updated user instance or None
         """
-        from sqlalchemy import func
+        from sqlalchemy import case
 
+        new_value = User.free_posts_used + count
+        capped = case(
+            (new_value > User.FREE_POSTS_LIMIT, User.FREE_POSTS_LIMIT),
+            else_=new_value,
+        )
         stmt = (
             update(User)
             .where(User.id == user_id)
-            .values(free_posts_used=func.least(User.free_posts_used + count, User.FREE_POSTS_LIMIT))
+            .values(free_posts_used=capped)
             .returning(User)
         )
         result = await self._session.execute(stmt)

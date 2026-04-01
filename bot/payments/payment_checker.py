@@ -89,6 +89,25 @@ async def check_pending_payments(
                             except Exception as e:
                                 logger.warning(f"Could not notify user {payment.user_id}: {e}")
                         
+
+                            # Notify admins
+                            try:
+                                from config.settings import settings
+                                for admin_id in settings.admin_ids:
+                                    try:
+                                        await bot.send_message(
+                                            admin_id,
+                                            f"\U0001f4b0 <b>\u041d\u043e\u0432\u0430\u044f \u043e\u043f\u043b\u0430\u0442\u0430!</b>\n\n"
+                                            f"User: <code>{payment.user_id}</code>\n"
+                                            f"\u0421\u0443\u043c\u043c\u0430: {int(payment.amount)}\u20bd\n"
+                                            f"\u041f\u043b\u0430\u0442\u0451\u0436: <code>{payment.payment_id}</code>",
+                                            parse_mode="HTML",
+                                        )
+                                    except Exception:
+                                        pass
+                            except Exception as e:
+                                logger.warning(f"Could not notify admins: {e}")
+
                         elif status == "canceled":
                             await payment_repo.update_status(
                                 payment.payment_id, "canceled"

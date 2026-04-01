@@ -59,7 +59,7 @@ def autopost_list_keyboard(has_subscriptions: bool = True) -> InlineKeyboardMark
     
     builder.button(text="➕ Новый автопостинг", callback_data="autopost_new")
     builder.button(text="📢 Мои каналы", callback_data="menu_my_channels")
-    builder.button(text="💰 Пополнить баланс", callback_data="menu_topup_balance")
+    builder.button(text="💰 Пополнить баланс", callback_data="balance_deposit")
     builder.button(text="🏠 В меню", callback_data="nav_goto_menu")
     
     builder.adjust(1)
